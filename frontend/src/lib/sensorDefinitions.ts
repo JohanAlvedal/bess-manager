@@ -27,6 +27,7 @@ export const INVERTER_INTEGRATION_IDS: Record<string, string> = {
   solax_modbus_growatt_min: 'solax_modbus_growatt_min',
   solax_modbus_growatt_sph: 'solax_modbus_growatt_sph',
   solax_modbus_native: 'solax_modbus_native',
+  huawei_solar: 'huawei_solar',
 };
 
 // Platform IDs are now used consistently at all layers — no conversion needed.
@@ -38,6 +39,7 @@ export const VALID_PLATFORMS = [
   'solax_modbus_growatt_min',
   'solax_modbus_growatt_sph',
   'solax_modbus_native',
+  'huawei_solar',
 ] as const;
 
 export type PlatformId = typeof VALID_PLATFORMS[number];
@@ -55,6 +57,7 @@ export interface PerPlatformSensors {
   solax_modbus_growatt_min: Record<string, string>;
   solax_modbus_growatt_sph: Record<string, string>;
   solax_modbus_native: Record<string, string>;
+  huawei_solar: Record<string, string>;
   shared: Record<string, string>;
 }
 
@@ -63,6 +66,18 @@ export const SHARED_INTEGRATION_IDS = new Set([
   'nordpool', 'solar_forecast', 'consumption_forecast',
   'phase_current', 'discharge_inhibit', 'weather',
 ]);
+
+export const HUAWEI_SOLAR_DEFAULT_SENSORS: Record<string, string> = {
+  battery_soc: 'sensor.batteries_state_of_capacity',
+  huawei_battery_power: 'sensor.batteries_charge_discharge_power',
+  huawei_grid_power: 'sensor.power_meter_active_power',
+  pv_power: 'sensor.inverter_input_power',
+  huawei_filtered_grid_import_power: 'sensor.filtered_grid_import_power',
+};
+
+export const HUAWEI_SOLAR_DEFAULT_SHARED_SENSORS: Record<string, string> = {
+  '48h_avg_grid_import': 'sensor.48h_average_grid_import_power',
+};
 
 /** Create an empty per-platform sensors structure. */
 export function emptyPerPlatformSensors(platform = ''): PerPlatformSensors {
@@ -73,7 +88,8 @@ export function emptyPerPlatformSensors(platform = ''): PerPlatformSensors {
     solax_modbus_growatt_min: {},
     solax_modbus_growatt_sph: {},
     solax_modbus_native: {},
-    shared: {},
+    huawei_solar: platform === 'huawei_solar' ? { ...HUAWEI_SOLAR_DEFAULT_SENSORS } : {},
+    shared: platform === 'huawei_solar' ? { ...HUAWEI_SOLAR_DEFAULT_SHARED_SENSORS } : {},
   };
 }
 
@@ -172,6 +188,31 @@ const GROWATT_CLOUD_SPH_SENSOR_GROUPS: SensorGroup[] = [
 ];
 
 export const INTEGRATIONS: IntegrationDef[] = [
+
+  {
+    id: 'huawei_solar',
+    name: 'Huawei Solar (Experimental — read-only)',
+    required: true,
+    description: 'Experimental read-only Huawei Solar support. Battery, grid, PV, and calculated house-load monitoring are supported; an optional direct house-load sensor can be used when available. Active battery control is not implemented and no Huawei settings or entities will be written.',
+    sensorGroups: [
+      {
+        name: 'Raw Huawei Inputs',
+        sensors: [
+          { key: 'battery_soc', label: 'Battery SOC', required: true },
+          { key: 'huawei_battery_power', label: 'Battery Charge/Discharge Power (signed)', required: true },
+          { key: 'huawei_grid_power', label: 'Grid Active Power (signed)', required: true },
+          { key: 'pv_power', label: 'Inverter Input Power (PV)', required: true },
+          { key: 'huawei_filtered_grid_import_power', label: 'Filtered Grid Import Power', required: true },
+        ],
+      },
+      {
+        name: 'Optional Direct House Load',
+        sensors: [
+          { key: 'huawei_house_load_power_entity', label: 'House Load Power', required: false },
+        ],
+      },
+    ],
+  },
   {
     id: 'growatt_server_min',
     name: 'Growatt Cloud (MIN)',

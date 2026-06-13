@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { AlertCircle, CheckCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../ui/tabs';
-import { INTEGRATIONS, INVERTER_INTEGRATION_IDS, SHARED_INTEGRATION_IDS } from '../../lib/sensorDefinitions';
+import { INTEGRATIONS, INVERTER_INTEGRATION_IDS, SHARED_INTEGRATION_IDS, HUAWEI_SOLAR_DEFAULT_SENSORS, HUAWEI_SOLAR_DEFAULT_SHARED_SENSORS } from '../../lib/sensorDefinitions';
 import type { IntegrationDef, PerPlatformSensors } from '../../lib/sensorDefinitions';
 import type { HealthStatus } from '../../types';
 
@@ -25,6 +25,7 @@ export interface DiscoveryResult {
   solaxFound: boolean;
   solaxHasGrowattTou: boolean;
   solaxHasGrowattGen3: boolean;
+  huaweiSolarFound?: boolean;
   nordpoolFound: boolean;
   nordpoolArea: string | null;
   nordpoolCustomArea: string | null;
@@ -73,6 +74,7 @@ function isIntegrationFound(
   if (id === 'solax_modbus_growatt_min') return discovery.solaxHasGrowattTou;
   if (id === 'solax_modbus_growatt_sph') return discovery.solaxHasGrowattGen3;
   if (id === 'solax_modbus_native') return discovery.solaxFound;
+  if (id === 'huawei_solar') return !!discovery.huaweiSolarFound || discovery.detectedInverterPlatforms?.includes('huawei_solar') === true;
   if (id === 'nordpool') return discovery.nordpoolFound;
   if (id === 'phase_current') {
     return !!(shared['current_l1'] || shared['current_l2'] || shared['current_l3']);
@@ -95,7 +97,7 @@ function integrationSensorCounts(
   let missingRequired = 0;
   for (const group of integration.sensorGroups) {
     for (const s of group.sensors) {
-      total++;
+      if (s.required || sensorMap[s.key]) total++;
       if (sensorMap[s.key]) configured++;
       else if (s.required) missingRequired++;
     }
@@ -143,7 +145,7 @@ function healthDot(
 // ---------------------------------------------------------------------------
 
 // IDs of inverter integrations — only one should be visible at a time.
-const INVERTER_IDS = new Set(['growatt_server_min', 'growatt_server_sph', 'solax_modbus_growatt_min', 'solax_modbus_growatt_sph', 'solax_modbus_native']);
+const INVERTER_IDS = new Set(['growatt_server_min', 'growatt_server_sph', 'solax_modbus_growatt_min', 'solax_modbus_growatt_sph', 'solax_modbus_native', 'huawei_solar']);
 
 interface Props {
   sensors: PerPlatformSensors;
@@ -175,11 +177,6 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
 
   // Derive active inverter integration from the selected type
   const activeInverterIntegrationId = INVERTER_INTEGRATION_IDS[inverterForm.inverterPlatform] ?? 'growatt_server_min';
-  const isGrowatt = activeInverterIntegrationId === 'growatt_server_min'
-    || activeInverterIntegrationId === 'growatt_server_sph'
-    || activeInverterIntegrationId === 'solax_modbus_growatt_min'
-    || activeInverterIntegrationId === 'solax_modbus_growatt_sph';
-
   // Detection flags for disabling platform options.
   const growattDetected = wizardMode
     ? discovery.growattFound
@@ -193,6 +190,9 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
   const solaxDetected = wizardMode
     ? Boolean(discovery.solaxFound && !discovery.solaxHasGrowattTou && !discovery.solaxHasGrowattGen3)
     : Boolean((sensors.solax_modbus_native ?? {})['solax_power_control_mode'] || (sensors.solax_modbus_native ?? {})['solax_active_power']);
+  const huaweiDetected = wizardMode
+    ? Boolean(discovery.huaweiSolarFound || discovery.detectedInverterPlatforms?.includes('huawei_solar'))
+    : Boolean((sensors.huawei_solar ?? {})['huawei_battery_power'] || (sensors.huawei_solar ?? {})['huawei_grid_power']);
 
   /** Update a sensor value in the correct sub-dict (platform or shared). */
   const handleSensorChange = (integrationId: string, sensorKey: string, value: string) => {
@@ -211,25 +211,39 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
     }
   };
 
-  // Derive which Level 1 integration is active
+  // Derive which Level 1 integration family is active.
   const isCloudActive = inverterForm.inverterPlatform === 'growatt_server_min' || inverterForm.inverterPlatform === 'growatt_server_sph';
   const isModbusActive = inverterForm.inverterPlatform === 'solax_modbus_growatt_min'
     || inverterForm.inverterPlatform === 'solax_modbus_growatt_sph'
     || inverterForm.inverterPlatform === 'solax_modbus_native';
+  const isHuaweiActive = inverterForm.inverterPlatform === 'huawei_solar';
 
-  const handleIntegrationChange = (integration: 'cloud' | 'modbus') => {
+  const handleIntegrationChange = (integration: 'cloud' | 'modbus' | 'huawei') => {
     if (integration === 'cloud') {
       const newType = 'growatt_server_min';
       onInverterChange({ ...inverterForm, inverterPlatform: newType });
       onChange({ ...sensors, platform: newType });
-    } else {
-      // Default to solax_modbus_growatt_min if Growatt TOU detected, otherwise native
-      const newType = growattModbusDetected ? 'solax_modbus_growatt_min'
-        : growattModbusGen3Detected ? 'solax_modbus_growatt_sph'
-        : 'solax_modbus_native';
-      onInverterChange({ ...inverterForm, inverterPlatform: newType });
-      onChange({ ...sensors, platform: newType });
+      return;
     }
+
+    if (integration === 'huawei') {
+      const newType = 'huawei_solar';
+      onInverterChange({ ...inverterForm, inverterPlatform: newType });
+      onChange({
+        ...sensors,
+        platform: newType,
+        huawei_solar: { ...HUAWEI_SOLAR_DEFAULT_SENSORS, ...(sensors.huawei_solar ?? {}) },
+        shared: { ...HUAWEI_SOLAR_DEFAULT_SHARED_SENSORS, ...(sensors.shared ?? {}) },
+      });
+      return;
+    }
+
+    // Default to solax_modbus_growatt_min if Growatt TOU detected, otherwise native
+    const newType = growattModbusDetected ? 'solax_modbus_growatt_min'
+      : growattModbusGen3Detected ? 'solax_modbus_growatt_sph'
+      : 'solax_modbus_native';
+    onInverterChange({ ...inverterForm, inverterPlatform: newType });
+    onChange({ ...sensors, platform: newType });
   };
 
   // Active inverter integration (rendered inside tab content)
@@ -257,18 +271,18 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
           Inverter Platform
         </p>
 
-        {/* Level 1: Integration tabs — Growatt Cloud vs SolaX Modbus */}
+        {/* Level 1: Inverter family tabs */}
         {(() => {
           const cloudDetected = growattDetected;
           const modbusDetected = growattModbusDetected || growattModbusGen3Detected || solaxDetected;
-          const activeTab = isCloudActive ? 'cloud' : 'modbus';
+          const activeTab = isCloudActive ? 'cloud' : isHuaweiActive ? 'huawei' : 'modbus';
 
           return (
-            <Tabs value={activeTab} onValueChange={(v) => handleIntegrationChange(v as 'cloud' | 'modbus')}>
-              <TabsList className="bg-gray-100 dark:bg-gray-700/60">
+            <Tabs value={activeTab} onValueChange={(v) => handleIntegrationChange(v as 'cloud' | 'modbus' | 'huawei')}>
+              <TabsList className="!grid !h-auto w-full grid-cols-3 bg-gray-100 dark:bg-gray-700/60 sm:w-auto">
                 <TabsTrigger
                   value="cloud"
-                  disabled={wizardMode && !cloudDetected}
+                  disabled={wizardMode && !cloudDetected && !isCloudActive}
                   className="data-[state=active]:bg-white dark:data-[state=active]:bg-gray-600 dark:text-gray-300 dark:data-[state=active]:text-white"
                 >
                   <span className="flex items-center gap-1.5">
@@ -280,7 +294,7 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
                 </TabsTrigger>
                 <TabsTrigger
                   value="modbus"
-                  disabled={wizardMode && !modbusDetected}
+                  disabled={wizardMode && !modbusDetected && !isModbusActive}
                   className="data-[state=active]:bg-white dark:data-[state=active]:bg-gray-600 dark:text-gray-300 dark:data-[state=active]:text-white"
                 >
                   <span className="flex items-center gap-1.5">
@@ -290,14 +304,26 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
                     SolaX Modbus
                   </span>
                 </TabsTrigger>
+                <TabsTrigger
+                  value="huawei"
+                  disabled={wizardMode && !huaweiDetected && !isHuaweiActive}
+                  className="data-[state=active]:bg-white dark:data-[state=active]:bg-gray-600 dark:text-gray-300 dark:data-[state=active]:text-white"
+                >
+                  <span className="flex items-center gap-1.5">
+                    {wizardMode && (
+                      <span className={`h-2 w-2 rounded-full flex-shrink-0 ${huaweiDetected ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-500'}`} />
+                    )}
+                    Huawei Solar
+                  </span>
+                </TabsTrigger>
               </TabsList>
 
               {/* Level 2: Model variant pills under each tab */}
               <TabsContent value="cloud">
                 <div className="flex flex-wrap items-center gap-2">
                   {([
-                    { value: 'growatt_server_min' as const, label: 'MIN/MIC/MOD (AC-coupled)' },
-                    { value: 'growatt_server_sph' as const, label: 'MIX/SPA/SPH (DC-coupled)' },
+                    { value: 'growatt_server_min' as const, label: 'Growatt MIN/GEN4' },
+                    { value: 'growatt_server_sph' as const, label: 'Growatt SPH/GEN3' },
                   ]).map(opt => {
                     const selected = inverterForm.inverterPlatform === opt.value;
                     return (
@@ -370,9 +396,36 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
                   })}
                 </div>
               </TabsContent>
+
+              <TabsContent value="huawei">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onInverterChange({ ...inverterForm, inverterPlatform: 'huawei_solar' });
+                      onChange({ ...sensors, platform: 'huawei_solar' });
+                    }}
+                    className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
+                      isHuaweiActive
+                        ? 'bg-purple-50 dark:bg-purple-900/30 border-purple-300 dark:border-purple-600 text-purple-700 dark:text-purple-300'
+                        : 'bg-white dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {wizardMode && <span className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${huaweiDetected ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-500'}`} />}
+                      Huawei Solar — Experimental read-only
+                    </span>
+                  </button>
+                </div>
+              </TabsContent>
             </Tabs>
           );
         })()}
+        {isHuaweiActive && (
+          <div className="mt-3 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50/70 dark:bg-purple-900/20 p-3 text-xs text-purple-800 dark:text-purple-200">
+            Battery monitoring, grid/PV monitoring, and calculated house-load monitoring are supported. Active battery control is not implemented. No Huawei settings or entities will be written.
+          </div>
+        )}
 
         {/* ── Active inverter sensor groups (inside platform section) ── */}
         {activeInverterIntegration && (() => {
@@ -419,17 +472,32 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
                               <span className="text-[9px] text-orange-500 dark:text-orange-400 font-medium">*</span>
                             )}
                           </div>
-                          <input
-                            type="text"
-                            value={val}
-                            placeholder={isMissing ? 'Not detected — enter entity ID' : ''}
-                            onChange={e => handleSensorChange(intg.id, s.key, e.target.value)}
-                            className={`flex-1 text-xs px-2 py-1 rounded border font-mono ${
-                              isMissing && s.required
-                                ? 'border-orange-300 dark:border-orange-600 bg-white dark:bg-gray-800 text-orange-700 dark:text-orange-300 placeholder-orange-400'
-                                : 'border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200'
-                            } focus:outline-none focus:ring-1 focus:ring-blue-400`}
-                          />
+                          <div className="flex-1">
+                            <input
+                              type="text"
+                              value={val}
+                              placeholder={
+                                s.key === 'huawei_house_load_power_entity'
+                                  ? 'sensor.house_load_power_calc'
+                                  : isMissing
+                                    ? 'Not detected — enter entity ID'
+                                    : ''
+                              }
+                              onChange={e =>
+                                handleSensorChange(intg.id, s.key, e.target.value)
+                              }
+                              className={`w-full text-xs px-2 py-1 rounded border font-mono ${
+                                isMissing && s.required
+                                  ? 'border-orange-300 dark:border-orange-600 bg-white dark:bg-gray-800 text-orange-700 dark:text-orange-300 placeholder-orange-400'
+                                  : 'border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200'
+                              } focus:outline-none focus:ring-1 focus:ring-blue-400`}
+                            />
+                            {s.key === 'huawei_house_load_power_entity' && (
+                              <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
+                                Optional. Use a positive instantaneous house consumption power sensor in W; kW is also accepted and normalized internally. If empty or invalid, BESS calculates house load from the raw Huawei inputs.
+                              </p>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
@@ -524,8 +592,16 @@ export function SensorConfigSection({ sensors, onChange, inverterForm, onInverte
                             <input
                               type="text"
                               value={val}
-                              placeholder={isMissing ? 'Not detected — enter entity ID' : ''}
-                              onChange={e => handleSensorChange(intg.id, s.key, e.target.value)}
+                              placeholder={
+                                s.key === 'huawei_house_load_power_entity'
+                                  ? 'sensor.house_load_power_calc'
+                                  : isMissing
+                                    ? 'Not detected — enter entity ID'
+                                    : ''
+                              }
+                              onChange={e =>
+                                handleSensorChange(intg.id, s.key, e.target.value)
+                              }
                               className={`flex-1 text-xs px-2 py-1 rounded border font-mono ${
                                 isMissing && s.required
                                   ? 'border-orange-300 dark:border-orange-600 bg-white dark:bg-gray-800 text-orange-700 dark:text-orange-300 placeholder-orange-400'

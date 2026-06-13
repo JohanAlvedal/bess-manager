@@ -2081,7 +2081,7 @@ async def get_prediction_timeline():
 async def get_prediction_comparison(
     snapshot_period: int = Query(
         ..., ge=0, le=95, description="Period index for snapshot"
-    )
+    ),
 ):
     """Compare snapshot predictions vs what actually happened."""
     from app import bess_controller
@@ -2831,6 +2831,7 @@ async def run_setup_discovery():
                 "solax_modbus_growatt_min": ha.SOLAX_GROWATT_MIN_SUFFIX_MAP,
                 "solax_modbus_growatt_sph": ha.SOLAX_GROWATT_SPH_SUFFIX_MAP,
                 "solax_modbus_native": ha.SOLAX_NATIVE_SUFFIX_MAP,
+                "huawei_solar": ha.HUAWEI_SOLAR_SUFFIX_MAP,
             }
             suffix_map = _suffix_maps.get(effective_platform, ha.GROWATT_MIN_SUFFIX_MAP)
             all_bess_keys = list(set(suffix_map.values()))
@@ -2842,6 +2843,9 @@ async def run_setup_discovery():
                     if not (k.startswith("tou_time_") and k[9:10] in "23456789")
                 ]
             missing_sensors = [k for k in all_bess_keys if k not in sensors]
+            if effective_platform == "huawei_solar":
+                for key, entity_id in ha.HUAWEI_DEFAULT_SHARED_SENSOR_MAP.items():
+                    sensors.setdefault(key, entity_id)
 
         current_sensors = ha.discover_current_sensors(states)
         for phase_key, entity_id in current_sensors.items():
@@ -2869,6 +2873,7 @@ async def run_setup_discovery():
                 "device_sn": integrations["device_sn"],
                 "growatt_device_id": integrations["growatt_device_id"],
                 "solax_found": integrations["solax_found"],
+                "huawei_solar_found": integrations.get("huawei_solar_found", False),
                 "solax_has_growatt_tou": integrations.get(
                     "solax_has_growatt_tou", False
                 ),
