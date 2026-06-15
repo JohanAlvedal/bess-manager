@@ -910,6 +910,10 @@ class BatterySystemManager:
         strategy_names = ["sensor", "fixed", "influxdb_7d_avg", "ha_statistics"]
         results = []
 
+        logger.info(
+            "Consumption forecast comparison: active strategy=%s", active_strategy
+        )
+
         for name in strategy_names:
             entry: dict = {
                 "name": name,
@@ -935,8 +939,20 @@ class BatterySystemManager:
                 entry["forecast"] = forecast
                 entry["total_kwh"] = sum(forecast)
                 entry["available"] = True
+                logger.info(
+                    "Consumption forecast comparison strategy=%s non_zero_periods=%d "
+                    "daily_total=%.3f kWh",
+                    name,
+                    sum(1 for value in forecast if value != 0),
+                    entry["total_kwh"],
+                )
             except Exception as e:
                 entry["error"] = str(e)
+                logger.warning(
+                    "Consumption forecast comparison strategy=%s unavailable: %s",
+                    name,
+                    e,
+                )
 
             results.append(entry)
 
@@ -962,6 +978,29 @@ class BatterySystemManager:
                     actual_hours += 1
         except Exception as e:
             logger.warning("Failed to fetch actual consumption data: %s", e)
+
+        actual_quarter_periods = 0
+        actual_daily_total = 0.0
+        try:
+            actual_quarter_periods = sum(
+                1
+                for p in daily_view.periods
+                if p.data_source == "actual"
+                and p.energy.home_consumption is not None
+            )
+            actual_daily_total = sum(v for v in actual_hourly if v is not None)
+        except Exception:
+            actual_quarter_periods = actual_hours * 4
+            actual_daily_total = sum(v for v in actual_hourly if v is not None)
+
+        logger.info(
+            "Consumption forecast comparison actuals: quarter_periods=%d "
+            "complete_hours=%d daily_total=%.3f kWh first_hours=%s",
+            actual_quarter_periods,
+            actual_hours,
+            actual_daily_total,
+            actual_hourly[:6],
+        )
 
         return {
             "active_strategy": active_strategy,

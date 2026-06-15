@@ -3,14 +3,33 @@ import { ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, Respons
 import { useConsumptionForecastComparison } from '../hooks/useConsumptionForecastComparison';
 // @ts-expect-error lucide-react .d.ts is too large for TS to resolve all exports
 import { AlertCircle, BarChart3, ChevronDown, ChevronUp } from 'lucide-react';
-import { StrategyForecast } from '../types';
+import { ConsumptionForecastComparison as ConsumptionForecastComparisonData, StrategyForecast } from '../types';
 import { niceYAxis } from '../utils/chartUtils';
 
-interface ChartDataPoint {
+export interface ChartDataPoint {
   hour: number;
   actual: number | null;
   [key: string]: number | null;
 }
+
+export const buildConsumptionChartData = (
+  comparison: ConsumptionForecastComparisonData | null,
+  availableStrategies: StrategyForecast[],
+): ChartDataPoint[] => {
+  if (!comparison || !availableStrategies.length) return [];
+  const points: ChartDataPoint[] = [];
+  for (let hour = 0; hour < 24; hour++) {
+    const point: ChartDataPoint = {
+      hour,
+      actual: comparison.actualHourlyProfile[hour]?.value ?? null,
+    };
+    for (const strat of availableStrategies) {
+      point[strat.name] = strat.hourlyProfile[hour]?.value ?? null;
+    }
+    points.push(point);
+  }
+  return points;
+};
 
 const STRATEGY_LABELS: Record<string, string> = {
   sensor: '48h Avg Sensor',
@@ -79,19 +98,7 @@ const ConsumptionForecastComparison: React.FC = () => {
   const hasActual = comparison ? comparison.actualHoursAvailable > 0 : false;
 
   const chartData: ChartDataPoint[] = useMemo(() => {
-    if (!comparison || !availableStrategies.length) return [];
-    const points: ChartDataPoint[] = [];
-    for (let hour = 0; hour < 24; hour++) {
-      const point: ChartDataPoint = {
-        hour,
-        actual: comparison.actualHourlyProfile[hour]?.value ?? null,
-      };
-      for (const strat of availableStrategies) {
-        point[strat.name] = strat.hourlyProfile[hour]?.value ?? null;
-      }
-      points.push(point);
-    }
-    return points;
+    return buildConsumptionChartData(comparison, availableStrategies);
   }, [comparison, availableStrategies]);
 
   const yAxis = useMemo(() => {

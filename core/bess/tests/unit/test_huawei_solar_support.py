@@ -1,8 +1,10 @@
 import logging
+from datetime import date
 from unittest.mock import Mock
 
 import pytest
 
+from core.bess import time_utils
 from core.bess.battery_system_manager import BatterySystemManager
 from core.bess.ha_api_controller import HomeAssistantAPIController
 from core.bess.huawei_sensor_transform import (
@@ -12,6 +14,8 @@ from core.bess.huawei_sensor_transform import (
     reset_warning_state,
 )
 from core.bess.huawei_solar_controller import HuaweiSolarController
+from core.bess.influxdb_helper import _parse_power_batch_response
+from core.bess.models import EnergyData, PeriodData
 from core.bess.sensor_collector import SensorCollector
 from core.bess.settings import BatterySettings
 
@@ -59,6 +63,19 @@ def test_huawei_grid_normalization(raw, imp, exp):
     normalized = normalize_huawei_power(HuaweiPowerSnapshot(grid_power_w=raw))
     assert normalized.import_power == imp
     assert normalized.export_power == exp
+
+
+def test_huawei_negative_zero_normalizes_to_plain_zero():
+    normalized = normalize_huawei_power(
+        HuaweiPowerSnapshot(battery_power_w=-0.0, grid_power_w=-0.0)
+    )
+
+    assert normalized.battery_charge_power == 0.0
+    assert normalized.battery_discharge_power == 0.0
+    assert normalized.import_power == 0.0
+    assert normalized.export_power == 0.0
+    assert repr(normalized.battery_charge_power) == "0.0"
+    assert repr(normalized.import_power) == "0.0"
 
 
 def test_huawei_house_load_formula_examples():
@@ -423,6 +440,76 @@ def test_influxdb_7d_avg_accepts_huawei_direct_house_load(monkeypatch):
     assert captured
     assert all(sensors == ["house_load"] for sensors in captured)
     assert forecast == [0.25] * 96
+
+
+def test_influxdb_1x_power_csv_parses_entity_id_and_converts_to_kwh():
+    csv = "\n".join(
+        [
+            "#datatype,string,long,dateTime:RFC3339,double,string,string,string",
+            "#group,false,false,false,false,true,true,true",
+            "#default,_result,,,,,,",
+            ",result,table,_time,_value,_field,_measurement,entity_id",
+            ",,0,2026-06-13T22:01:00Z,1000,value,W,house_load",
+            ",,0,2026-06-13T22:10:00Z,3000,value,W,house_load",
+            ",,0,2026-06-13T23:01:00Z,4000,value,W,house_load",
+        ]
+    )
+
+    parsed = _parse_power_batch_response(
+        csv, date(2026, 6, 14), time_utils.TIMEZONE
+    )
+
+    assert parsed[0]["sensor.house_load"] == pytest.approx(0.5)
+    assert parsed[4]["sensor.house_load"] == pytest.approx(1.0)
+    assert 1 not in parsed
+
+
+def test_missing_influxdb_power_series_does_not_become_all_zero_profile(monkeypatch):
+    ha = HomeAssistantAPIController(
+        "http://ha",
+        "token",
+        sensor_config={"local_load_power": "sensor.house_load"},
+    )
+    manager = BatterySystemManager(controller=ha, price_source=Mock())
+
+    monkeypatch.setattr(
+        "core.bess.battery_system_manager.get_power_sensor_data_batch",
+        lambda sensors, target_date: {"status": "success", "data": {}},
+    )
+
+    with pytest.raises(ValueError, match="no valid historical data"):
+        manager._get_influxdb_7d_avg_forecast()
+
+
+def test_consumption_comparison_aggregates_nonzero_actual_quarters():
+    manager = BatterySystemManager(controller=Mock(), price_source=Mock())
+    manager.home_settings.consumption_strategy = "fixed"
+    periods = []
+    for period in range(96):
+        periods.append(
+            PeriodData(
+                period=period,
+                energy=EnergyData(
+                    solar_production=0.0,
+                    home_consumption=0.25 if period < 4 else 0.0,
+                    battery_charged=0.0,
+                    battery_discharged=0.0,
+                    grid_imported=0.0,
+                    grid_exported=0.0,
+                    battery_soe_start=0.0,
+                    battery_soe_end=0.0,
+                ),
+                data_source="actual" if period < 4 else "predicted",
+            )
+        )
+    daily_view = Mock(periods=periods)
+    manager.get_current_daily_view = Mock(return_value=daily_view)
+
+    comparison = manager.get_consumption_forecast_comparison()
+
+    assert comparison["actual_hourly"][0] == pytest.approx(1.0)
+    assert comparison["actual_hourly"][1] is None
+    assert comparison["actual_hours_available"] == 1
 
 
 def test_huawei_missing_lifetime_energy_sensors_are_not_critical():
