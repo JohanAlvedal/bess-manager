@@ -15,6 +15,11 @@ _WARNING_INTERVAL_SECONDS = 300.0
 _last_negative_load_warning: float | None = None
 
 
+def _non_negative_magnitude(value: float) -> float:
+    """Return a non-negative value with negative zero normalized to ordinary zero."""
+    return 0.0 if value <= 0.0 else value
+
+
 @dataclass(frozen=True)
 class HuaweiPowerSnapshot:
     """Raw Huawei power values normalized to watts."""
@@ -79,13 +84,13 @@ def normalize_huawei_power(
     """
     battery_charge = battery_discharge = None
     if snapshot.battery_power_w is not None:
-        battery_charge = max(snapshot.battery_power_w, 0.0)
-        battery_discharge = max(-snapshot.battery_power_w, 0.0)
+        battery_charge = _non_negative_magnitude(snapshot.battery_power_w)
+        battery_discharge = _non_negative_magnitude(-snapshot.battery_power_w)
 
     import_power = export_power = None
     if snapshot.grid_power_w is not None:
-        import_power = max(-snapshot.grid_power_w, 0.0)
-        export_power = max(snapshot.grid_power_w, 0.0)
+        import_power = _non_negative_magnitude(-snapshot.grid_power_w)
+        export_power = _non_negative_magnitude(snapshot.grid_power_w)
 
     local_load = None
     diagnostic = None
