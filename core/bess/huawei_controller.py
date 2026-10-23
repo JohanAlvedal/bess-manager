@@ -20,12 +20,15 @@ Outside a period the battery routes PV surplus by its excess-PV select, so
 that select follows each period's plan: "fed_to_grid" when the plan blocks
 passive solar charging (SOLAR_EXPORT, and the discharging intents), "charge"
 otherwise.
+A discharge period only covers the house. BATTERY_EXPORT — selling stored
+energy — is realized as a forcible discharge at the plan's power, re-issued
+every period and stopped when the export ends.
 """
 
 import logging
 import re
 from datetime import datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from . import time_utils
 from .dp_schedule import DPSchedule
@@ -41,6 +44,13 @@ WORKING_MODE_TOU = "time_of_use_luna2000"
 # huawei-solar-lib's StorageExcessPvEnergyUseInTOU (FED_TO_GRID=0, CHARGE=1).
 EXCESS_PV_CHARGE = "charge"
 EXCESS_PV_FED_TO_GRID = "fed_to_grid"
+
+# The forcible discharge is re-issued at every 15-min period tick. One minute
+# past the quarter bridges tick jitter so export doesn't lapse between
+# quarters; the next non-export period stops it explicitly, and if BESS dies
+# the battery stops on its own a minute after the plan's quarter ended.
+FORCIBLE_EXPORT_DURATION_MIN = 16
+FORCIBLE_MODE_DISCHARGE = "Discharge"
 
 # Working-mode select options that mean "BESS-controlled Time Of Use", across
 # the integrations that front a Huawei battery. Stock huawei_solar exposes
@@ -132,6 +142,66 @@ class HuaweiController(InverterController):
         """Initialize the Huawei controller."""
         super().__init__(battery_settings)
         self._periods: list[dict] = []
+
+    def apply_period(
+        self,
+        controller: Any,
+        grid_charge: bool,
+        discharge_rate: int,
+        block_passive_charging: bool = False,
+        strategic_intent: str = "",
+        at_reserve_floor: bool = False,
+        charge_rate: int = 100,
+        discharge_authorized: bool = False,
+    ) -> tuple[bool, str]:
+        """Write this period's per-period controls: the excess-PV select, then
+        the forcible export. Overrides the base only because the export needs
+        the intent — grid_charge/discharge_rate are identical for LOAD_SUPPORT
+        and BATTERY_EXPORT, which a TOU discharge period cannot tell apart."""
+        success, error = self._write_period_to_hardware(
+            controller, grid_charge, discharge_rate, block_passive_charging
+        )
+        if not success:
+            return success, error
+        return self._apply_forcible_export(controller, strategic_intent, discharge_rate)
+
+    def _apply_forcible_export(
+        self, controller: Any, strategic_intent: str, discharge_rate: int
+    ) -> tuple[bool, str]:
+        """Force the battery to export during BATTERY_EXPORT; end it after.
+
+        ``discharge_rate`` arrives post-inhibit, so an inhibited export
+        quarter (rate 0) stops the battery like any non-export period.
+
+        Requires the forcible status sensor: knowing whether a stop is due
+        means reading the battery, not trusting BESS's own record of what it
+        started (#551) — a restart mid-export would otherwise leave it
+        running. Unmapped, BATTERY_EXPORT stays a TOU discharge period.
+        """
+        if not controller.is_sensor_configured("huawei_forcible_status"):
+            return True, ""
+
+        if strategic_intent == "BATTERY_EXPORT" and discharge_rate > 0:
+            power_w = round(discharge_rate / 100 * self.max_discharge_power_kw * 1000)
+            try:
+                controller.huawei_forcible_discharge(
+                    power_w=power_w, duration_min=FORCIBLE_EXPORT_DURATION_MIN
+                )
+            except Exception as e:
+                return False, f"huawei_forcible_discharge({power_w}W) failed: {e}"
+            return True, ""
+
+        try:
+            mode = controller.get_huawei_forcible_mode()
+            if mode != FORCIBLE_MODE_DISCHARGE:
+                return True, ""
+            logger.info(
+                "HUAWEI HARDWARE: export period over, stopping forcible discharge"
+            )
+            controller.huawei_stop_forcible_charge()
+        except Exception as e:
+            return False, f"stopping forcible discharge failed: {e}"
+        return True, ""
 
     def _write_period_to_hardware(
         self,

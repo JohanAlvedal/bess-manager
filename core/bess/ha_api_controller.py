@@ -963,6 +963,10 @@ class HomeAssistantAPIController:
         # where PV surplus goes outside a TOU period — "charge" or
         # "fed_to_grid", the lowercased enum names huawei_solar's select uses.
         "storage_excess_pv_energy_use_in_tou": "huawei_excess_pv_mode",
+        # huawei_solar sensor.py HuaweiSolarForcibleChargeEntity: status of the
+        # forcible charge/discharge command, its register (47100) in the
+        # "mode" attribute. Key has no storage_ prefix (register_names.py).
+        "forcible_charge_discharge_write": "huawei_forcible_status",
         # No household-load entry: the huawei_solar integration has no load
         # register outside an EMMA. active_power (32080) is the inverter's
         # signed AC output and goes negative while the battery charges from the
@@ -1955,6 +1959,72 @@ class HomeAssistantAPIController:
             option=option,
         )
 
+    def _require_huawei_device_id(self) -> str:
+        if not self.huawei_device_id:
+            raise SystemConfigurationError(
+                "Huawei battery device_id not configured. Run the setup wizard "
+                "to configure the inverter."
+            )
+        return self.huawei_device_id
+
+    def huawei_forcible_discharge(self, power_w: int, duration_min: int) -> None:
+        """Force the battery to discharge at ``power_w`` for ``duration_min``.
+
+        Exports whatever the house doesn't use (huawei_solar
+        forcible_discharge). Runs alongside the TOU working mode.
+
+        Raises:
+            SystemConfigurationError: If huawei_device_id is not configured.
+        """
+        device_id = self._require_huawei_device_id()
+        self._service_call_with_retry(
+            self._vendor_service_domain(),
+            "forcible_discharge",
+            operation=f"Huawei forcible discharge {power_w}W for {duration_min} min",
+            device_id=device_id,
+            power=power_w,
+            duration=duration_min,
+        )
+
+    def huawei_stop_forcible_charge(self) -> None:
+        """End any forcible charge or discharge on the battery.
+
+        Raises:
+            SystemConfigurationError: If huawei_device_id is not configured.
+        """
+        device_id = self._require_huawei_device_id()
+        self._service_call_with_retry(
+            self._vendor_service_domain(),
+            "stop_forcible_charge",
+            operation="Huawei stop forcible charge/discharge",
+            device_id=device_id,
+        )
+
+    def get_huawei_forcible_mode(self) -> str:
+        """Read the forcible command register: "Stop", "Charge" or "Discharge".
+
+        The sensor's state is display text; the register value is published
+        as its "mode" attribute (huawei_solar sensor.py).
+
+        Raises:
+            ValueError: If the forcible status sensor isn't configured.
+            SystemConfigurationError: If the entity can't be read — reporting
+                it as "Stop" would leave a forced export running unchecked.
+        """
+        entity_id = self._get_entity_for_service("huawei_forcible_status")
+        response = self._api_request(
+            "get",
+            f"/api/states/{entity_id}",
+            operation="Read Huawei forcible charge/discharge status",
+            category="sensor_read",
+        )
+        if not response or response.get("state") in ("unavailable", "unknown", None):
+            raise SystemConfigurationError(
+                f"Huawei forcible status sensor '{entity_id}' is unreadable "
+                f"(state={response.get('state') if response else None})"
+            )
+        return str(response["attributes"]["mode"])
+
     def write_huawei_tou_periods(self, periods_text: str) -> None:
         """Write the Huawei battery's TOU period list via huawei_solar.set_tou_periods.
 
@@ -1965,16 +2035,12 @@ class HomeAssistantAPIController:
         Raises:
             SystemConfigurationError: If huawei_device_id is not configured.
         """
-        if not self.huawei_device_id:
-            raise SystemConfigurationError(
-                "Huawei battery device_id not configured. Run the setup wizard "
-                "to configure the inverter."
-            )
+        device_id = self._require_huawei_device_id()
         self._service_call_with_retry(
             self._vendor_service_domain(),
             "set_tou_periods",
             operation="Write Huawei TOU periods",
-            device_id=self.huawei_device_id,
+            device_id=device_id,
             periods=periods_text,
         )
 

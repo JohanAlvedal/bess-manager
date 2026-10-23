@@ -308,6 +308,11 @@ def _huawei_registry(serial: str = "HW2024ABCDEF") -> list[dict]:
             f"{serial}_storage_maximum_discharging_power",
         ),
         _entity(
+            "sensor.huawei_battery_forcible_charge",
+            "huawei_solar",
+            f"{serial}_forcible_charge_discharge_write",
+        ),
+        _entity(
             "select.huawei_battery_excess_pv_energy_use_in_tou",
             "huawei_solar",
             f"{serial}_storage_excess_pv_energy_use_in_tou",
@@ -2492,7 +2497,7 @@ class TestHuaweiDiscovery:
             result["battery_discharge_stop_soc"]
             == "number.huawei_battery_discharging_cutoff_capacity"
         )
-        assert len(result) == 17
+        assert len(result) == 18
 
     def test_excess_pv_select_mapped(self) -> None:
         """huawei-solar-lib register_names.py STORAGE_EXCESS_PV_ENERGY_USE_IN_TOU
@@ -2503,6 +2508,17 @@ class TestHuaweiDiscovery:
         assert (
             result["huawei_excess_pv_mode"]
             == "select.huawei_battery_excess_pv_energy_use_in_tou"
+        )
+
+    def test_forcible_status_sensor_mapped(self) -> None:
+        """huawei_solar sensor.py HuaweiSolarForcibleChargeEntity, keyed on
+        huawei-solar-lib STORAGE_FORCIBLE_CHARGE_DISCHARGE_WRITE
+        ("forcible_charge_discharge_write", no storage_ prefix)."""
+        result, _disabled = self.ctrl._map_registry_entities(
+            _huawei_registry(), ["huawei_solar"], self.ctrl.HUAWEI_SUFFIX_MAP
+        )
+        assert result["huawei_forcible_status"] == (
+            "sensor.huawei_battery_forcible_charge"
         )
 
     def test_inverter_active_power_is_not_household_load(self) -> None:
