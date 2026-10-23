@@ -26,6 +26,7 @@ def controller() -> HomeAssistantAPIController:
                 "huawei_excess_pv_mode": (
                     "select.batteries_excess_pv_energy_use_in_tou"
                 ),
+                "huawei_forcible_status": "sensor.batteries_forcible_charge",
             }
         ),
         huawei_device_id="dev-123",
@@ -69,6 +70,57 @@ class TestHuaweiServiceCalls:
         with patch.object(controller, "_get_raw_state", return_value="charge") as m:
             assert controller.get_huawei_excess_pv_mode() == "charge"
             m.assert_called_once_with("huawei_excess_pv_mode")
+
+    def test_forcible_discharge_calls_vendor_service_with_device_id(
+        self, controller: HomeAssistantAPIController
+    ) -> None:
+        with patch.object(controller, "_api_request") as mock_request:
+            mock_request.return_value = {}
+            controller.huawei_forcible_discharge(power_w=3000, duration_min=16)
+            args, kwargs = mock_request.call_args
+            assert args[1] == "/api/services/huawei_solar/forcible_discharge"
+            assert kwargs["json"] == {
+                "device_id": "dev-123",
+                "power": 3000,
+                "duration": 16,
+            }
+
+    def test_stop_forcible_charge_calls_vendor_service_with_device_id(
+        self, controller: HomeAssistantAPIController
+    ) -> None:
+        with patch.object(controller, "_api_request") as mock_request:
+            mock_request.return_value = {}
+            controller.huawei_stop_forcible_charge()
+            args, kwargs = mock_request.call_args
+            assert args[1] == "/api/services/huawei_solar/stop_forcible_charge"
+            assert kwargs["json"] == {"device_id": "dev-123"}
+
+    def test_forcible_discharge_raises_without_device_id(self) -> None:
+        ctrl = HomeAssistantAPIController(ha_url="http://ha.local", token="tok")
+        with pytest.raises(SystemConfigurationError):
+            ctrl.huawei_forcible_discharge(power_w=3000, duration_min=16)
+
+    def test_forcible_mode_read_from_status_sensor_attribute(
+        self, controller: HomeAssistantAPIController
+    ) -> None:
+        """The sensor's state is display text ("Discharging at 1000W for 15
+        minutes"); the command register itself is the "mode" attribute."""
+        with patch.object(controller, "_api_request") as mock_request:
+            mock_request.return_value = {
+                "state": "Discharging at 1000W for 15 minutes",
+                "attributes": {"mode": "Discharge", "duration": 15},
+            }
+            assert controller.get_huawei_forcible_mode() == "Discharge"
+
+    def test_unreadable_forcible_status_raises(
+        self, controller: HomeAssistantAPIController
+    ) -> None:
+        """Reporting an unreadable sensor as "Stop" would leave a forced
+        export running past its plan."""
+        with patch.object(controller, "_api_request") as mock_request:
+            mock_request.return_value = {"state": "unavailable", "attributes": {}}
+            with pytest.raises(SystemConfigurationError):
+                controller.get_huawei_forcible_mode()
 
     def test_write_huawei_tou_periods_includes_device_id(
         self, controller: HomeAssistantAPIController

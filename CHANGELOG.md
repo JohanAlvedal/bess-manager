@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - **Debug export: Inverter page schedule included** — a bundle now records the Schedule Overview values you saw, so display problems can be checked directly. ([#866](https://github.com/johanzander/bess-manager/issues/866))
 - **Debug-log replay at an earlier time starts from the battery level recorded then** — `mock-run.sh <bundle> HH:MM` no longer plans from the export-time SOC. ([#889](https://github.com/johanzander/bess-manager/issues/889))
 - **Huawei: Solar Export periods send PV surplus to the grid** — BESS sets the battery's "Excess PV energy use in TOU" select per period, so planned export no longer charges the battery. ([#925](https://github.com/johanzander/bess-manager/issues/925))
+- **Huawei: planned battery export sells to the grid** — Battery Export periods force the battery to discharge at the planned power instead of only covering the house. ([#925](https://github.com/johanzander/bess-manager/issues/925))
 
 ### Fixed
 

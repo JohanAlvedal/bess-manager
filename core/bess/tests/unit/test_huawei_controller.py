@@ -900,9 +900,7 @@ class FakeExcessPvSelect:
         self.write_count = 0
 
     def is_sensor_configured(self, sensor_key: str) -> bool:
-        if sensor_key == "huawei_excess_pv_mode":
-            return self.mapped
-        return True
+        return sensor_key == "huawei_excess_pv_mode" and self.mapped
 
     def get_huawei_excess_pv_mode(self) -> str | None:
         if not self.mapped:
@@ -1087,3 +1085,229 @@ class TestCheckHealthReportsExcessPvSelect:
 
         assert result[0]["status"] == "WARNING"
         assert self._excess_pv_check(result)["status"] == "WARNING"
+
+
+class FakeForcibleBattery:
+    """Execution model of a LUNA2000's forcible charge/discharge command.
+
+    huawei_solar's forcible_discharge makes the battery push the given power
+    to the AC side for a duration, exporting whatever the house doesn't use;
+    stop_forcible_charge ends it. The status sensor reports the command
+    register's mode ("Stop" / "Charge" / "Discharge"). The fake records what
+    the battery is doing in each period and every service call, so a day's
+    replay can check both where the battery was forced and how often the
+    registers were written.
+    """
+
+    def __init__(self, status_mapped: bool = True, mode: str = "Stop") -> None:
+        self.status_mapped = status_mapped
+        self.mode = mode
+        self.discharge_power_w = 0
+        self.duration_min = 0
+        self.discharge_calls = 0
+        self.stop_calls = 0
+
+    def is_sensor_configured(self, sensor_key: str) -> bool:
+        if sensor_key == "huawei_forcible_status":
+            return self.status_mapped
+        return False
+
+    def get_huawei_forcible_mode(self) -> str:
+        if not self.status_mapped:
+            raise AssertionError("status read attempted while unmapped")
+        return self.mode
+
+    def huawei_forcible_discharge(self, power_w: int, duration_min: int) -> None:
+        self.mode = "Discharge"
+        self.discharge_power_w = power_w
+        self.duration_min = duration_min
+        self.discharge_calls += 1
+
+    def huawei_stop_forcible_charge(self) -> None:
+        self.mode = "Stop"
+        self.discharge_power_w = 0
+        self.stop_calls += 1
+
+
+def forced_discharge_per_period(
+    controller: HuaweiController,
+    battery: FakeForcibleBattery,
+    intents: list[str],
+    actions_kw: list[float],
+) -> list[int]:
+    """Replay a day's periods as battery_system_manager drives them and
+    return the power the battery was forced to discharge at in each (0 when
+    not forced)."""
+    controller.apply_intents(make_schedule_mock(intents))
+    forced = []
+    for period, intent in enumerate(intents):
+        grid_charge, discharge_rate, block_passive_charging = (
+            controller.compute_rates_for_period(period, actions_kw[period])
+        )
+        success, error = controller.apply_period(
+            battery,
+            grid_charge,
+            discharge_rate,
+            block_passive_charging,
+            strategic_intent=intent,
+        )
+        assert success, error
+        forced.append(battery.discharge_power_w if battery.mode == "Discharge" else 0)
+    return forced
+
+
+def export_day() -> tuple[list[str], list[float]]:
+    """Evening export 18:00-19:00 at 3 kW, then house support 19:00-20:00."""
+    intents = make_intents({18: "BATTERY_EXPORT", 19: "LOAD_SUPPORT"})
+    actions = [0.0] * 96
+    for p in range(72, 80):
+        actions[p] = -3.0
+    return intents, actions
+
+
+class TestForcibleBatteryExport:
+    """A TOU discharge period only covers the house; BATTERY_EXPORT plans to
+    sell stored energy, which on a LUNA2000 takes a forcible discharge."""
+
+    def test_battery_is_forced_to_the_planned_power_only_while_exporting(
+        self, controller: HuaweiController
+    ) -> None:
+        intents, actions = export_day()
+        battery = FakeForcibleBattery()
+
+        forced = forced_discharge_per_period(controller, battery, intents, actions)
+
+        for period, intent in enumerate(intents):
+            expected = 3000 if intent == "BATTERY_EXPORT" else 0
+            assert forced[period] == expected, (period, intent)
+
+    def test_each_command_outlives_its_quarter_so_export_does_not_lapse(
+        self, controller: HuaweiController
+    ) -> None:
+        """The command is re-issued every quarter; it must last past the next
+        tick or the battery stops exporting between quarters."""
+        intents, actions = export_day()
+        battery = FakeForcibleBattery()
+
+        forced_discharge_per_period(controller, battery, intents, actions)
+
+        assert battery.duration_min > 15
+
+    def test_stopped_once_when_the_export_block_ends(
+        self, controller: HuaweiController
+    ) -> None:
+        intents, actions = export_day()
+        battery = FakeForcibleBattery()
+
+        forced_discharge_per_period(controller, battery, intents, actions)
+
+        assert battery.discharge_calls == 4
+        assert battery.stop_calls == 1
+
+    def test_inhibited_export_quarter_stops_the_battery(
+        self, controller: HuaweiController
+    ) -> None:
+        """The caller zeroes the discharge rate under discharge inhibit (e.g.
+        an EV charging); a forced export already running must end."""
+        controller.apply_intents(make_schedule_mock(export_day()[0]))
+        battery = FakeForcibleBattery(mode="Discharge")
+
+        success, error = controller.apply_period(
+            battery, False, 0, True, strategic_intent="BATTERY_EXPORT"
+        )
+
+        assert success, error
+        assert battery.mode == "Stop"
+
+    def test_a_forced_export_left_running_by_a_restart_is_stopped(
+        self, controller: HuaweiController
+    ) -> None:
+        """BESS restarted mid-export: the battery still reports Discharge and
+        the plan has moved on, so the first non-export period stops it."""
+        controller.apply_intents(make_schedule_mock(make_intents({})))
+        battery = FakeForcibleBattery(mode="Discharge")
+
+        success, error = controller.apply_period(
+            battery, False, 0, False, strategic_intent="IDLE"
+        )
+
+        assert success, error
+        assert battery.mode == "Stop"
+
+    def test_unmapped_status_sensor_leaves_export_to_the_tou_period(
+        self, controller: HuaweiController
+    ) -> None:
+        """Without the status sensor BESS cannot tell when a stop is needed,
+        so it does not start what it could not reliably end."""
+        intents, actions = export_day()
+        battery = FakeForcibleBattery(status_mapped=False)
+
+        forced = forced_discharge_per_period(controller, battery, intents, actions)
+
+        assert not any(forced)
+        assert battery.discharge_calls == 0
+        assert battery.stop_calls == 0
+
+
+class TestCheckHealthReportsForcibleStatusSensor:
+    """Without the forcible status sensor, BATTERY_EXPORT stays a TOU
+    discharge period that only covers the house. That must be visible in
+    System Health, so a user whose export periods don't export can see why
+    (#925) — but as SKIPPED, not a WARNING, since it is an optional sensor."""
+
+    @staticmethod
+    def _ha(
+        status_mapped: bool,
+        status_value: str = "Stop",
+        status_readable: bool = True,
+        service_domain: str = "huawei_solar",
+    ) -> MagicMock:
+        ha = MagicMock()
+        ha.service_domain = service_domain
+        ha.is_sensor_configured.side_effect = lambda key: (
+            status_mapped if key == "huawei_forcible_status" else True
+        )
+        ha.get_huawei_working_mode.return_value = "time_of_use_luna2000"
+        ha.get_huawei_excess_pv_mode.return_value = "charge"
+        ha.get_huawei_forcible_mode.return_value = status_value
+        if not status_readable:
+            ha.get_huawei_forcible_mode.side_effect = SystemConfigurationError(
+                "entity unavailable"
+            )
+        return ha
+
+    @staticmethod
+    def _forcible_check(result: list) -> dict:
+        return next(c for c in result[0]["checks"] if "forcible" in c["component"])
+
+    def test_unmapped_sensor_is_shown_without_lowering_battery_control(
+        self, controller: HuaweiController
+    ) -> None:
+        result = controller.check_health(self._ha(status_mapped=False))
+
+        assert result[0]["status"] == "OK"
+        check = self._forcible_check(result)
+        assert check["status"] == "SKIPPED"
+        assert "BATTERY_EXPORT" in check["message"]
+
+    def test_mapped_sensor_reports_ok_with_its_current_state(
+        self, controller: HuaweiController
+    ) -> None:
+        result = controller.check_health(
+            self._ha(status_mapped=True, status_value="Discharge")
+        )
+
+        assert result[0]["status"] == "OK"
+        check = self._forcible_check(result)
+        assert check["status"] == "OK"
+        assert "Discharge" in check["message"]
+
+    def test_unreadable_sensor_is_reported_as_warning(
+        self, controller: HuaweiController
+    ) -> None:
+        result = controller.check_health(
+            self._ha(status_mapped=True, status_readable=False)
+        )
+
+        assert result[0]["status"] == "WARNING"
+        assert self._forcible_check(result)["status"] == "WARNING"
