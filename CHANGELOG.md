@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
-- **Huawei: solar surplus follows the plan during Solar Export** — BESS now sets the battery's "Excess PV energy use in TOU" select per period, so planned export no longer charges the battery.
+- **Huawei without EMMA: Home Usage shows the real house load instead of 0 W** — live load is derived from solar, grid and battery power when no load sensor is mapped. ([#598](https://github.com/johanzander/bess-manager/issues/598))
 
 ### Added
 
