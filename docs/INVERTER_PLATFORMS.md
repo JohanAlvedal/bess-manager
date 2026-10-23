@@ -594,6 +594,20 @@ otherwise — reading first and writing only on change, since it is a
 persistent config register. Unmapped (e.g. EMMA installs), it is left alone
 and surplus follows whatever the select is set to.
 
+**Battery export via forcible discharge (optional).** A TOU discharge period
+only covers the house; it does not sell stored energy. BATTERY_EXPORT is
+therefore realized with `huawei_solar.forcible_discharge` (which runs
+alongside the TOU working mode): every export period BESS issues it at the
+plan's discharge power for 16 minutes — one minute past the quarter, so
+export doesn't lapse between ticks — and when the plan leaves BATTERY_EXPORT,
+or discharge inhibit zeroes the rate, it reads the forcible status sensor and
+calls `stop_forcible_charge` if the battery still reports `Discharge`. If BESS
+stops running, the battery ends the export on its own. This needs
+`huawei_forcible_status` mapped: deciding whether a stop is due means reading
+the battery, not trusting BESS's record of what it started (a restart
+mid-export would otherwise leave it running). Unmapped, BATTERY_EXPORT stays
+a plain TOU discharge period.
+
 **Schedule readback (optional, #431).** `huawei_solar` has no
 `read_tou_periods` service, but its TOU period sensor publishes the
 programmed periods as `Period N` extra state attributes, in the very text
@@ -918,6 +932,7 @@ Only slot 1 of each direction is strictly required; slots 2-6 are optional
 | `huawei_working_mode` | select | `storage_working_mode_settings` | Battery working mode (gating TOU writes) |
 | `huawei_tou_periods` | sensor | `storage_huawei_luna2000_time_of_use_charging_and_discharging_periods` | Optional: programmed TOU periods, read back at startup (#431) |
 | `huawei_excess_pv_mode` | select | `storage_excess_pv_energy_use_in_tou` | Optional: PV surplus to battery or grid outside a TOU period, set per period from the plan |
+| `huawei_forcible_status` | sensor | `forcible_charge_discharge_write` | Optional: forcible charge/discharge status (`mode` attribute); enables battery export via forcible discharge |
 | `local_load_power` | sensor | `active_power` | Home consumption (W) |
 | `pv_power` | sensor | `input_power` | Real-time solar PV power (W) |
 | `import_power` / `export_power` | sensor | `power_meter_active_power` (separate power-meter device, signed) | Net grid power (W); both keys map to this entity, split by sign at read time (`grid_power_polarity`, `"export_positive"` — issue #438) |

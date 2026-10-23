@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **Huawei: solar surplus follows the plan during Solar Export** — BESS now sets the battery's "Excess PV energy use in TOU" select per period, so planned export no longer charges the battery.
 
+### Added
+
+- **Huawei: planned battery export actually sells to the grid** — Battery Export periods now force the battery to discharge at the planned power instead of only covering the house.
+
 ## [11.1.0] - 2026-10-20
 
 ### Fixed
