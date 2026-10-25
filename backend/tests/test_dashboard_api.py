@@ -7,7 +7,7 @@ in _aggregate_quarterly_to_hourly.
 
 import sys
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,8 +18,10 @@ from fastapi.testclient import TestClient
 
 from core.bess import time_utils
 from core.bess.battery_system_manager import BatterySystemManager
+from core.bess.calendar_windows import CalendarWindow
 from core.bess.daily_view_builder import DailyView
 from core.bess.exceptions import SystemConfigurationError
+from core.bess.free_import_overlay import apply_free_import_windows
 from core.bess.models import DecisionData, EconomicData, EnergyData, PeriodData
 from core.bess.settings import BatterySettings
 
@@ -112,9 +114,13 @@ def _wire_schedule_store(
     mock_schedule.optimization_period = optimization_period
     mock_schedule.optimization_result.period_data = period_data
     ctrl.system.schedule_store.get_latest_schedule.return_value = mock_schedule
-    by_timestamp = {p.timestamp: p for p in period_data}
+    # Keyed by instant like the real ScheduleStore: aware datetimes sharing a
+    # ZoneInfo compare equal across the repeated DST fall-back hour.
+    by_timestamp = {
+        p.timestamp.astimezone(UTC): p for p in period_data if p.timestamp is not None
+    }
     ctrl.system.schedule_store.get_period_data_at.side_effect = (
-        lambda ts: by_timestamp.get(ts)
+        lambda ts: by_timestamp.get(ts.astimezone(UTC))
     )
 
 
@@ -292,15 +298,20 @@ class TestDashboardFullHorizonCost:
         ctrl = _make_started_controller()
 
         today = time_utils.today()
+        tomorrow = today + timedelta(days=1)
+        # Real day lengths: tomorrow can be a 92/100-period DST day.
+        today_count = time_utils.get_period_count(today)
+        tomorrow_count = time_utils.get_period_count(tomorrow)
         period_data = [
-            _make_period_with_costs(i, today, grid_cost=0.0, grid_only_cost=0.5)
-            for i in range(96)
+            _make_period_with_costs(0, today, grid_cost=0.0, grid_only_cost=0.5)
+            for _ in range(today_count)
         ] + [
-            _make_period_with_costs(
-                i - 96, today + timedelta(days=1), grid_cost=0.1, grid_only_cost=0.2
-            )
-            for i in range(96, 192)
+            _make_period_with_costs(0, tomorrow, grid_cost=0.1, grid_only_cost=0.2)
+            for _ in range(tomorrow_count)
         ]
+        for index, period in enumerate(period_data):
+            period.period = index
+            period.timestamp = time_utils.period_index_to_timestamp(index)
         _wire_schedule_store(ctrl, period_data)
 
         sys.modules["app"].bess_controller = ctrl
@@ -309,10 +320,14 @@ class TestDashboardFullHorizonCost:
         assert resp.status_code == 200
         summary = resp.json()["summary"]
         assert summary["horizonDays"] == 2
-        # today: 96 periods * (grid_cost=0.0, grid_only_cost=0.5) -> netGrid=0.0, gridOnly=48.0
-        # tomorrow: 96 periods * (grid_cost=0.1, grid_only_cost=0.2) -> netGrid=9.6, gridOnly=19.2
-        assert summary["netGridCostFullHorizon"]["value"] == pytest.approx(9.6)
-        assert summary["netSavingsFullHorizon"]["value"] == pytest.approx(57.6)
+        # today: grid_cost=0.0, grid_only_cost=0.5 per period
+        # tomorrow: grid_cost=0.1, grid_only_cost=0.2 per period
+        net_grid = 0.1 * tomorrow_count
+        grid_only = 0.5 * today_count + 0.2 * tomorrow_count
+        assert summary["netGridCostFullHorizon"]["value"] == pytest.approx(net_grid)
+        assert summary["netSavingsFullHorizon"]["value"] == pytest.approx(
+            grid_only - net_grid
+        )
 
 
 class TestDashboardShadowPrice:
@@ -1253,3 +1268,73 @@ def test_hourly_data_exposes_wear_free_net_and_battery_savings():
     # battery_cycle_cost=0.1 — if wear were included this would instead be
     # solar_only_cost - hourly_cost = 6.0 - 2.1 = 3.9).
     assert api_hourly.batterySavings.value == 4.0
+
+
+class TestDashboardFreeImportOnDstFallBack:
+    """On the 25-hour fall-back day the two 02:00 hours share a wall-clock
+    label, so a free-import window covering only the second one must flag only
+    the second one's periods (#833).
+    """
+
+    _DAY = date(2026, 10, 25)
+
+    @classmethod
+    def _period_at(cls, index: int) -> PeriodData:
+        start = datetime.combine(
+            cls._DAY, datetime.min.time(), tzinfo=time_utils.TIMEZONE
+        ).astimezone(UTC) + timedelta(minutes=15 * index)
+        return replace(
+            _make_period(0),
+            period=index,
+            timestamp=start.astimezone(time_utils.TIMEZONE),
+        )
+
+    def test_only_the_second_02_00_hour_is_flagged_free(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(time_utils, "today", lambda: self._DAY)
+        # Second 02:00 hour = 01:00-02:00 UTC = elapsed periods 12-15.
+        window = CalendarWindow(
+            start=datetime(2026, 10, 25, 1, 0, tzinfo=UTC),
+            end=datetime(2026, 10, 25, 2, 0, tzinfo=UTC),
+        )
+        base = datetime.combine(self._DAY, datetime.min.time())
+        entries = apply_free_import_windows(
+            [
+                {
+                    "timestamp": (base + timedelta(minutes=15 * i)).strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+                    "price": 1.0,
+                    "buyPrice": 1.0,
+                    "sellPrice": 0.5,
+                }
+                for i in range(100)
+            ],
+            self._DAY,
+            [window],
+            free_price=0.0,
+        )
+        ctrl = _make_started_controller()
+        ctrl.system.get_current_daily_view.return_value = DailyView(
+            date=self._DAY,
+            periods=[self._period_at(i) for i in range(100)],
+            total_savings=0.0,
+            actual_count=0,
+            predicted_count=100,
+        )
+        ctrl.system.price_manager.get_cached_today_prices.return_value = entries
+        ctrl.system.price_manager.get_cached_tomorrow_prices.return_value = []
+        sys.modules["app"].bess_controller = ctrl  # type: ignore[attr-defined]
+
+        resp = _client.get("/api/dashboard?resolution=quarter-hourly")
+        assert resp.status_code == 200
+        hourly = resp.json()["hourlyData"]
+
+        assert len(hourly) == 100
+        assert [i for i, h in enumerate(hourly) if h["isFreeImport"]] == [
+            12,
+            13,
+            14,
+            15,
+        ]
