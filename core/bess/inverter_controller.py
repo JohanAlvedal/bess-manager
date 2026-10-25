@@ -781,6 +781,10 @@ class InverterController(ABC):
         if period >= len(period_data):
             return False
         planned = period_data[period]
+        # Periods that elapsed before the latest re-plan carry None
+        # (BatterySystemManager's full-day period_data).
+        if planned is None:
+            return False
         return idle_hold_releasable(
             planned.decision.intra_period_discharge_allowed,
             planned.energy.grid_imported,
