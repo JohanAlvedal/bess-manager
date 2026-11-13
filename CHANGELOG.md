@@ -10,13 +10,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - **Debug export: planned consumption changes shown beside measured managed-load energy** — a bundle now shows whether an EV charger or other managed load followed the blocks you declared. ([#863](https://github.com/johanzander/bess-manager/issues/863))
 - **Debug export: Inverter page schedule included** — a bundle now records the Schedule Overview values you saw, so display problems can be checked directly. ([#866](https://github.com/johanzander/bess-manager/issues/866))
-- **Huawei: planned battery export actually sells to the grid** — Battery Export periods now force the battery to discharge at the planned power instead of only covering the house.
+- **Huawei: planned battery export actually sells to the grid** — Battery Export periods now force the battery to discharge at the planned power instead of only covering the house. ([#9](https://github.com/JohanAlvedal/bess-manager/pull/9))
 
 ### Fixed
 
 - **Huawei without EMMA: Home Usage shows the real house load instead of 0 W** — live load is derived from solar, grid and battery power when no load sensor is mapped. ([#598](https://github.com/johanzander/bess-manager/issues/598))
-- **Huawei: solar surplus follows the plan during Solar Export** — BESS now sets the battery's "Excess PV energy use in TOU" select per period, so planned export no longer charges the battery.
-- **Inverter schedule view shows the hours that ran before a re-plan** — after a mid-day re-optimization every earlier hour failed with `'NoneType' object has no attribute 'decision'` and was shown as a placeholder IDLE row.
+- **Huawei: solar surplus follows the plan during Solar Export** — BESS now sets the battery's "Excess PV energy use in TOU" select per period, so planned export no longer charges the battery. ([#8](https://github.com/JohanAlvedal/bess-manager/pull/8))
+- **Inverter schedule view shows the hours that ran before a re-plan** — after a mid-day re-optimization every earlier hour failed with `'NoneType' object has no attribute 'decision'` and was shown as a placeholder IDLE row. ([#13](https://github.com/JohanAlvedal/bess-manager/pull/13))
 - **Huawei: an idle plan clears old charge/discharge periods from the battery** — huawei_solar rejects an empty TOU list, so the previous plan's periods stayed on the battery and repeated daily. BESS now clears them with a period that applies on no day. ([#10](https://github.com/JohanAlvedal/bess-manager/pull/10))
 - **Growatt VPP: the discharge inhibit now stops the battery powering the house** — with an EV charging, a battery-support period holds instead of draining the battery into the car. ([#881](https://github.com/johanzander/bess-manager/issues/881))
 - **Fuse protection: charging no longer jumps back to full power every other minute** — the limit now settles under the fuse rating. ([#877](https://github.com/johanzander/bess-manager/issues/877))
