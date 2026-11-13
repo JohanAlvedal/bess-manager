@@ -7,6 +7,7 @@ code paths without needing a live Home Assistant instance.
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -1301,6 +1302,59 @@ class TestWriteSolisPeriod:
         )
 
 
+class TestSolisDischargeLimits:
+    # Command-level on purpose: these pin the HA service each limit reaches.
+    # What the limits do to the battery is asserted in
+    # test_solis_modbus_controller.py against the measured inverter model.
+    @pytest.fixture
+    def limits_ctrl(
+        self, ctrl: HomeAssistantAPIController
+    ) -> HomeAssistantAPIController:
+        ctrl.sensors = {
+            **ctrl.sensors,
+            "solis_discharge_cutoff_soc_3": "number.solis_cutoff_3",
+            "solis_discharge_current_3": "number.solis_current_3",
+        }
+        return ctrl
+
+    def test_cutoff_is_written_to_the_slot_number_entity(
+        self, limits_ctrl: HomeAssistantAPIController
+    ) -> None:
+        with patch.object(limits_ctrl, "_service_call_with_retry") as call:
+            limits_ctrl.set_solis_discharge_cutoff_soc(3, 100)
+
+        call.assert_called_once()
+        assert call.call_args.args[:2] == ("number", "set_value")
+        assert call.call_args.kwargs["entity_id"] == "number.solis_cutoff_3"
+        assert call.call_args.kwargs["value"] == 100
+
+    def test_current_is_written_to_the_slot_number_entity(
+        self, limits_ctrl: HomeAssistantAPIController
+    ) -> None:
+        with patch.object(limits_ctrl, "_service_call_with_retry") as call:
+            limits_ctrl.set_solis_discharge_current(3, 39.1)
+
+        assert call.call_args.kwargs["entity_id"] == "number.solis_current_3"
+        assert call.call_args.kwargs["value"] == 39.1
+
+    def test_unconfigured_slot_fails_loudly(
+        self, limits_ctrl: HomeAssistantAPIController
+    ) -> None:
+        with pytest.raises(ValueError):
+            limits_ctrl.set_solis_discharge_cutoff_soc(1, 100)
+
+    def test_missing_sensors_lists_every_unconfigured_limit(
+        self, limits_ctrl: HomeAssistantAPIController
+    ) -> None:
+        missing = limits_ctrl.missing_solis_discharge_limit_sensors()
+
+        assert "solis_discharge_cutoff_soc_1" in missing
+        assert "solis_discharge_current_6" in missing
+        assert "battery_voltage" in missing
+        assert "solis_discharge_cutoff_soc_3" not in missing
+        assert "solis_discharge_current_3" not in missing
+
+
 class TestGridChargeEnabled:
     def test_switch_on(self, ctrl):
         ctrl.session.get = _session_method_mock(
@@ -1373,6 +1427,23 @@ class TestGetEntityStateRaw:
         )
         result = ctrl.get_entity_state_raw("sensor.battery_soc")
         assert result["state"] == "50"
+
+    def test_optional_404_raises_without_error_log(
+        self, ctrl: Any, caplog: Any
+    ) -> None:
+        """#863: probing a disabled entity must not log an ERROR per entity."""
+        ctrl.session.get = _session_method_mock("get", return_value=_mock_404())
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(requests.HTTPError):
+                ctrl.get_entity_state_raw("button.inv_time_7_update", optional=True)
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    def test_default_404_still_logs_error(self, ctrl: Any, caplog: Any) -> None:
+        ctrl.session.get = _session_method_mock("get", return_value=_mock_404())
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(requests.HTTPError):
+                ctrl.get_entity_state_raw("sensor.missing")
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 # ── run_request helper ───────────────────────────────────────────────────────

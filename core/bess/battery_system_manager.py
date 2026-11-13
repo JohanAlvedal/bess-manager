@@ -15,7 +15,11 @@ import requests
 
 from . import time_utils
 from .calendar_windows import CalendarWindow
-from .consumption_overlay import apply_overlay, period_starts_from
+from .consumption_overlay import (
+    apply_overlay,
+    declared_vs_measured_hourly,
+    period_starts_from,
+)
 from .daily_view_builder import DailyView, DailyViewBuilder
 from .daily_view_store import DailyViewStore
 from .dp_battery_algorithm import (
@@ -1173,7 +1177,7 @@ class BatterySystemManager:
         """Fetch and initialize historical data using quarterly resolution."""
         try:
             now = time_utils.now()
-            current_period = now.hour * 4 + now.minute // 15
+            current_period = time_utils.timestamp_to_period_index(now)
 
             logger.info(
                 f"Fetching historical data - current period: {current_period} ({format_period(current_period)})"
@@ -1961,6 +1965,53 @@ class BatterySystemManager:
             return None
         return {"statistic_id": statistic_id, "stats": stats}
 
+    def get_consumption_overlay_for_debug_export(self) -> dict:
+        """Declared overlay blocks beside the managed loads' measured energy (#863).
+
+        Lets a debug bundle show whether a managed load (e.g. an EV charger)
+        actually followed the blocks the user declared, which the bundle could
+        not otherwise tell apart from BESS ignoring them. Only the blocks the
+        overlay entity reports *now* are available — past declarations are not
+        stored — so the hourly table pairs those with the last 48 h of
+        measured managed-load energy.
+
+        Returns:
+            ``{"configured": False}`` when no overlay entity is set, else
+            ``blocks``, ``managed_load_sensors`` and ``hourly`` (see
+            ``declared_vs_measured_hourly``). Failures to read blocks or
+            statistics propagate; the exporter records them explicitly.
+        """
+        if self._controller is None or not self._controller.sensors.get(
+            "consumption_overlay"
+        ):
+            return {"configured": False}
+
+        blocks = self._controller.get_consumption_overlay_blocks()
+        sensors = list(self.home_settings.managed_load_sensors)
+        end_dt = time_utils.now()
+        start_dt = end_dt - timedelta(hours=48)
+        managed_stats: dict[str, list[dict]] = {}
+        for sensor in sensors:
+            _, stats = self._fetch_recorder_change_stats(sensor, start_dt, end_dt)
+            managed_stats[sensor] = stats
+
+        return {
+            "configured": True,
+            "blocks": [
+                {
+                    "start": b.start.isoformat(),
+                    "end": b.end.isoformat(),
+                    "energy_kwh": b.energy_kwh,
+                    "mode": b.mode,
+                }
+                for b in blocks
+            ],
+            "managed_load_sensors": sensors,
+            "hourly": declared_vs_measured_hourly(
+                blocks, managed_stats, time_utils.TIMEZONE
+            ),
+        }
+
     def _get_ha_statistics_forecast(self) -> list[float]:
         """Get consumption forecast from HA Recorder long-term statistics.
 
@@ -2052,9 +2103,21 @@ class BatterySystemManager:
             else:
                 price_entries = self._price_manager.get_cached_today_prices()
 
-                # Extend with tomorrow's prices when available
+                # Extend with tomorrow's prices when available. Not when today
+                # is missing or ends early (sell prices missing for its last
+                # periods): the horizon is indexed by period, so tomorrow 00:00
+                # would land on a today slot, or on today's midnight.
                 tomorrow_entries = self._price_manager.get_cached_tomorrow_prices()
-                if tomorrow_entries:
+                today_period_count = get_period_count(time_utils.today())
+                if len(price_entries) < today_period_count:
+                    if price_entries:
+                        logger.warning(
+                            "Today's prices end early (%d of %d periods), "
+                            "not extending the horizon with tomorrow",
+                            len(price_entries),
+                            today_period_count,
+                        )
+                elif tomorrow_entries:
                     price_entries = price_entries + tomorrow_entries
                     logger.info(
                         "Extended price horizon with %d tomorrow entries (total: %d)",
@@ -3712,12 +3775,10 @@ class BatterySystemManager:
                 )
                 discharge_rate = 0
 
-        hour = period // 4
         logger.info(
-            "Period %d (%02d:%02d): Intent=%s, Action=%.2f kWh (%.2f kW), DischargeRate=%d%%",
+            "Period %d (%s): Intent=%s, Action=%.2f kWh (%.2f kW), DischargeRate=%d%%",
             period,
-            hour,
-            (period % 4) * 15,
+            format_period(period),
             strategic_intent,
             battery_action_kwh,
             battery_action_kw,
@@ -4390,7 +4451,7 @@ class BatterySystemManager:
                 "healthy — retrying the initial schedule build"
             )
             now = time_utils.now()
-            current_period = now.hour * 4 + now.minute // 15
+            current_period = time_utils.timestamp_to_period_index(now)
             self.update_battery_schedule(current_period=current_period)
         return health_results
 
@@ -4510,24 +4571,25 @@ class BatterySystemManager:
         The period index determines the split between actual (before) and predicted (after) data.
 
         Args:
-            current_period: Period index (0-95) to get daily view for. If None, uses current system time.
+            current_period: Today's period index to get daily view for. If None, uses current system time.
                            Determines which periods are marked as actual vs predicted.
 
         Returns:
             DailyView: Complete daily view with quarterly periods combining actual and predicted data
 
         Raises:
-            SystemConfigurationError: If current_period is not in valid range 0-95
+            SystemConfigurationError: If current_period is not one of today's periods
         """
         # Calculate current period from current time if not provided
         now = time_utils.now()
         if current_period is None:
-            current_period = now.hour * 4 + now.minute // 15
+            current_period = time_utils.timestamp_to_period_index(now)
         else:
             # Validate period range
-            if not 0 <= current_period <= 95:
+            last_period = get_period_count(now.date()) - 1
+            if not 0 <= current_period <= last_period:
                 raise SystemConfigurationError(
-                    message=f"current_period must be 0-95, got {current_period}"
+                    message=f"current_period must be 0-{last_period}, got {current_period}"
                 )
 
         # Build daily view with current period, then attach today's Power
@@ -4581,7 +4643,7 @@ class BatterySystemManager:
 
         try:
             now = time_utils.now()
-            current_period = now.hour * 4 + now.minute // 15
+            current_period = time_utils.timestamp_to_period_index(now)
             settings = self._inverter_controller.get_period_settings(current_period)
             charge_rate = settings["charge_rate"]
 
@@ -4870,7 +4932,7 @@ class BatterySystemManager:
             return
 
         now = time_utils.now()
-        current_period = now.hour * 4 + now.minute // 15
+        current_period = time_utils.timestamp_to_period_index(now)
 
         # Create table header
         lines = [

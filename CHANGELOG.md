@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Debug export: planned consumption changes shown beside measured managed-load energy** — a bundle now shows whether an EV charger or other managed load followed the blocks you declared. ([#863](https://github.com/johanzander/bess-manager/issues/863))
+- **Debug export: Inverter page schedule included** — a bundle now records the Schedule Overview values you saw, so display problems can be checked directly. ([#866](https://github.com/johanzander/bess-manager/issues/866))
+
 ### Fixed
 
 - **Huawei without EMMA: Home Usage shows the real house load instead of 0 W** — live load is derived from solar, grid and battery power when no load sensor is mapped. ([#598](https://github.com/johanzander/bess-manager/issues/598))
@@ -16,12 +21,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 
 - **Huawei: planned battery export actually sells to the grid** — Battery Export periods now force the battery to discharge at the planned power instead of only covering the house.
+- **Growatt VPP: the discharge inhibit now stops the battery powering the house** — with an EV charging, a battery-support period holds instead of draining the battery into the car. ([#881](https://github.com/johanzander/bess-manager/issues/881))
+- **Fuse protection: charging no longer jumps back to full power every other minute** — the limit now settles under the fuse rating. ([#877](https://github.com/johanzander/bess-manager/issues/877))
+- **Inverter page: no more phantom Solar or inflated Grid energy in Schedule Overview** — each row now shows its own measured or planned solar and grid charging. ([#866](https://github.com/johanzander/bess-manager/issues/866))
+- **Solis: Powering Home now follows the house load, and the battery can hold energy for later** — re-run sensor discovery after updating. ([#869](https://github.com/johanzander/bess-manager/issues/869))
+- **Date selector: day and week labels now follow your browser language** — an English UI no longer shows Swedish weekday and month names. ([#862](https://github.com/johanzander/bess-manager/issues/862))
+- **Debug export: disabled inverter entities no longer log an error each** — they are reported in one line instead. ([#863](https://github.com/johanzander/bess-manager/issues/863))
+- **Settings: refreshing the page with unsaved edits now asks before discarding them** — sensor entities typed but not yet saved are no longer silently lost. ([#857](https://github.com/johanzander/bess-manager/issues/857))
+
+## [11.1.1] - 2026-11-01
+
+### Fixed
+
+- **Solis: the per-period update no longer fails with an argument-count error** — the scheduled write and the discharge-inhibit restore now complete instead of raising, so BESS keeps running on Solis. ([#850](https://github.com/johanzander/bess-manager/issues/850))
+- **Planned Schedule no longer logs an error per elapsed hour, nor shows made-up IDLE rows for them** — a mid-day plan has no decision for hours already passed, and the display now treats that as "no discharge authorisation". ([#847](https://github.com/johanzander/bess-manager/issues/847))
 - **ENTSO-e: an incomplete day of prices is no longer planned on** — a leftover `prices_tomorrow` stub no longer creates a flat, idle second day, or hides a complete day published beside it. ([#841](https://github.com/johanzander/bess-manager/issues/841), [#845](https://github.com/johanzander/bess-manager/issues/845))
 - **ENTSO-e: tomorrow's prices are no longer rejected on the 25-hour fall-back day** — the integration sends 24 hourly prices; both occurrences of the repeated hour now use the one price received, with a warning. ([#830](https://github.com/johanzander/bess-manager/issues/830))
 - **DST change days: the current period and schedule timestamps now follow real time** — on the 25-hour day the plan no longer runs an hour late after 02:00, and the last hour is reachable. ([#830](https://github.com/johanzander/bess-manager/issues/830))
 - **DST change days: consumption and solar forecasts now match the real 92- or 100-period day** — nothing after the repeated hour is shifted by an hour. ([#689](https://github.com/johanzander/bess-manager/issues/689))
 - **DST change days: the plan no longer drops the last hour of the two-day horizon** — the 100-period fall-back day, as tomorrow or today, is now planned in full. ([#832](https://github.com/johanzander/bess-manager/issues/832))
 - **A malformed Planned Consumption Changes block no longer freezes the schedule** — BESS now ignores the bad block, keeps planning on the base forecast and logs the error, instead of blocking optimization until the template is fixed. ([#824](https://github.com/johanzander/bess-manager/pull/824))
+- **DST change days: the scheduler and inverter schedules now follow real time too** — the 15-minute cycle, startup and sensor collection still counted the current period from the wall clock, and TOU / charge-period times were still written as `period // 4`, so after the repeated hour every action ran an hour after the price it was planned on. Growatt MIN no longer programs overlapping segments in the repeated hour, and the dashboard no longer fails with `hour must be in 0..23` for the day's last hour. ([#844](https://github.com/johanzander/bess-manager/pull/844))
 - **Octopus free-import windows on the 25-hour fall-back day** — each period now shows its own free-import flag instead of the wrong hour's. ([#833](https://github.com/johanzander/bess-manager/issues/833))
 
 ## [11.1.0] - 2026-10-20
