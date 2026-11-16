@@ -342,16 +342,17 @@ Requires the `local_load_power` sensor configured in your add-on sensor settings
 
 Uses Home Assistant's built-in Recorder long-term statistics to build a 96-period time-of-day consumption profile from the past 7 days. Like `load_power_7d_avg`, this produces a shaped forecast — higher during evening peaks, lower overnight — but from the cumulative load-energy statistics rather than instantaneous power samples.
 
-Requires the `lifetime_load_consumption` sensor configured in the **Sensors** tab (under Consumption Forecast). This should be a cumulative energy sensor (kWh) tracked by HA's long-term statistics — for example `sensor.load_energy_total` from your inverter integration.
+If the `lifetime_load_consumption` sensor is mapped in the **Integrations** tab, BESS reads its history. This should be a cumulative energy sensor (kWh) tracked by HA's long-term statistics — for example `sensor.load_energy_total` from your inverter integration.
+
+If it isn't mapped — many platforms have no load register, e.g. Huawei without an EMMA energy manager — BESS derives the load history from the five lifetime counters every platform already maps (solar, grid import, grid export, battery charged, battery discharged): `load = solar + import − export − charged + discharged` per hour. Those counters already have recorder history, so the strategy works immediately, with no helper sensor and no wait for new statistics. An hour missing from any counter is left out rather than derived from the rest, and an hour whose balance comes out negative is counted as zero.
 
 **How it works**: BESS queries the HA Recorder for hourly `change` statistics over the past 7 days, groups them by hour-of-day, and computes a trimmed mean (dropping the highest and lowest values) for each hour. This filters out outlier spikes like occasional EV charging sessions while preserving the true daily consumption shape. The hourly averages are then split into 15-minute periods.
 
 **Safeguards**:
 
-- The option is **greyed out** in Settings if the required sensor is not configured.
-- If the sensor is configured but HA has not yet accumulated enough history (fewer than 12 hours of data), BESS automatically **falls back to the fixed profile** and shows a warning on the dashboard. Once HA accumulates sufficient data (typically within 12-24 hours of first configuring the sensor), the system self-heals and the warning auto-dismisses.
+- If no load history can be read (a counter is unmapped, or HA has fewer than 12 hours of data), BESS automatically **falls back to the fixed profile** and shows a warning on the dashboard. Once HA accumulates sufficient data, the system self-heals and the warning auto-dismisses.
 
-This is the recommended strategy for most users — it adapts to your actual usage patterns with no extra integrations or configuration beyond a cumulative load sensor.
+This is the recommended strategy for most users — it adapts to your actual usage patterns with no extra integrations or configuration.
 
 #### Managed Loads — excluding a regular habit from the baseline
 

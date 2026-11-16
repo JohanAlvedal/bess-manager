@@ -130,7 +130,7 @@ export function BatteryFormSection({
               <>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
                   Uses the weather entity to derate charging power in cold temperatures (LFP protection).
-                  Configure the weather entity in the <strong>Sensors</strong> tab under Weather Integration.
+                  Configure the weather entity in the <strong>Integrations</strong> tab under Weather Integration.
                   {weatherEntity && (
                     <span className="ml-1 text-green-600 dark:text-green-400">Current: {weatherEntity}</span>
                   )}

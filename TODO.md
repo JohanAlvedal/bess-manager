@@ -245,21 +245,11 @@
 
 **Current State**: The inverter sometimes charges/discharges small amounts like 0.1kW. Or its a rounding error or inefficiencies losses when calculating flows. I don't think its a strategic intent, but it is interpreted as one.
 
-### **Make ha_statistics consumption forecast work on all platforms**
-
-**Impact**: Medium | **Effort**: Medium | **Dependencies**: `battery_system_manager.py`, `ha_api_controller.py`
-
-**Description**: The `ha_statistics` consumption forecast strategy currently requires a native `lifetime_load_consumption` HA entity to query HA Recorder statistics. Platforms without this entity (GEN4 Growatt Modbus, SolaX Native) fall back to the `fixed` profile, losing the time-of-day shaped consumption forecast.
-
-**Fix**: Instead of querying a single load consumption entity, query the 3 universal sensors (`lifetime_solar_energy`, `lifetime_import_from_grid`, `lifetime_export_to_grid`) and derive load per hour: `load = solar_change + import_change - export_change`. Same physics, works on every platform.
-
-**Files**: `core/bess/battery_system_manager.py` (`_get_ha_statistics_forecast`)
-
 ### **Change default consumption_strategy from `sensor` to `ha_statistics`**
 
 **Impact**: Medium | **Effort**: Low | **Dependencies**: `settings.py`, `settings_store.py`
 
-**Description**: The default `consumption_strategy` is still `sensor` (the legacy grid-import proxy that ignores solar self-consumption and requires a hand-written template sensor). `ha_statistics` is more accurate and needs no manual sensor setup, so it should be the default. Depends on `ha_statistics` working on all platforms (see above) so the default doesn't silently fall back to `fixed`.
+**Description**: The default `consumption_strategy` is still `sensor` (the legacy grid-import proxy that ignores solar self-consumption and requires a hand-written template sensor). `ha_statistics` is more accurate and needs no manual sensor setup, so it should be the default. `ha_statistics` now works on every platform: without a load sensor it derives the load history from the five lifetime counters.
 
 **Fix**: Change `DEFAULT` / `consumption_strategy` default to `ha_statistics` in `core/bess/settings.py:183` and the settings-store defaults; update `docs/USER_GUIDE.md` (currently labels `sensor` as "(default)").
 

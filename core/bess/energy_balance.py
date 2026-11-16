@@ -56,3 +56,69 @@ def derive_load_consumption(
         - battery_charged
         - export_to_grid
     )
+
+
+# The five lifetime counters derive_load_consumption needs, keyed by the
+# sensor key each is mapped under. Every platform requires all five, which is
+# what lets the lifetime reading and the recorder history both fall back to
+# the balance when no load sensor is mapped.
+LOAD_BALANCE_COUNTERS: dict[str, str] = {
+    "lifetime_solar_energy": "solar_production",
+    "lifetime_import_from_grid": "import_from_grid",
+    "lifetime_export_to_grid": "export_to_grid",
+    "lifetime_battery_charged": "battery_charged",
+    "lifetime_battery_discharged": "battery_discharged",
+}
+
+
+def derive_load_consumption_stats(
+    counter_stats: dict[str, list[dict]],
+) -> tuple[list[dict], int, int]:
+    """Derive hourly house-load statistics from the counters' recorder stats.
+
+    Args:
+        counter_stats: HA Recorder ``{"start", "change"}`` entries per
+            counter, keyed by sensor key (every key of
+            ``LOAD_BALANCE_COUNTERS``). All lists come from the same query
+            window, so equal ``start`` values denote the same hour.
+
+    Returns:
+        ``(stats, incomplete_hours, clamped_hours)``. ``stats`` holds one
+        ``{"start", "change"}`` entry per hour that every counter reported.
+        An hour missing from any counter is left out and counted in
+        ``incomplete_hours``: deriving it from the rest would drop a whole
+        term of the balance. A negative hourly balance is floored at 0.0 and
+        counted in ``clamped_hours`` — counters that update at different
+        moments can shift a little energy across an hour boundary, and a
+        negative load would corrupt the profile.
+    """
+    changes_by_counter = {
+        key: {entry["start"]: entry["change"] for entry in counter_stats[key]}
+        for key in LOAD_BALANCE_COUNTERS
+    }
+    all_starts: list = []
+    seen: set = set()
+    for key in LOAD_BALANCE_COUNTERS:
+        for entry in counter_stats[key]:
+            if entry["start"] not in seen:
+                seen.add(entry["start"])
+                all_starts.append(entry["start"])
+
+    stats: list[dict] = []
+    incomplete_hours = 0
+    clamped_hours = 0
+    for start in all_starts:
+        changes: dict[str, float] = {}
+        for key, arg in LOAD_BALANCE_COUNTERS.items():
+            change = changes_by_counter[key].get(start)
+            if change is not None:
+                changes[arg] = change
+        if len(changes) < len(LOAD_BALANCE_COUNTERS):
+            incomplete_hours += 1
+            continue
+        load = derive_load_consumption(**changes)
+        if load < 0:
+            clamped_hours += 1
+            load = 0.0
+        stats.append({"start": start, "change": load})
+    return stats, incomplete_hours, clamped_hours
