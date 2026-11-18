@@ -6,7 +6,7 @@ inversion.
 
 import logging
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
@@ -14,7 +14,10 @@ from . import time_utils
 from .calendar_windows import CalendarWindow
 from .exceptions import PriceDataUnavailableError, SystemConfigurationError
 from .free_import_overlay import apply_free_import_windows
-from .settings import FREE_IMPORT_PRICE
+from .settings import (
+    FREE_IMPORT_PRICE,
+    GRID_TARIFF_SUMMER_MONTHS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +38,11 @@ class PriceSource:
     # tomorrow fetch before this time — the prices provably do not exist
     # yet, and the failing call only adds load to a sometimes-flaky HA
     # integration (#709). A published market fact, not a tuning knob.
-    # Base default is permissive so an unrecognised source is never gated.
-    TOMORROW_EARLIEST: ClassVar[tuple[int, int, str]] = (0, 0, "UTC")
+    # The wall-clock is on the day BEFORE the day being published. Base
+    # default is permissive so an unrecognised source is never gated: midnight
+    # in UTC+14, the first timezone to reach a date, precedes every user's own
+    # midnight.
+    TOMORROW_EARLIEST: ClassVar[tuple[int, int, str]] = (0, 0, "Pacific/Kiritimati")
 
     @property
     def period_duration_hours(self) -> float:
@@ -70,6 +76,19 @@ class PriceSource:
         additional costs) and uses the raw price as-is.  Sell prices are still
         taken from get_sell_prices_for_date() if provided, otherwise the raw
         price + tax_reduction formula applies.
+
+        Default is False (sources return VAT-exclusive spot prices).
+        """
+        return False
+
+    @property
+    def prices_include_vat(self) -> bool:
+        """Whether this source's spot prices are published VAT-inclusive.
+
+        When True, PriceManager divides them by its own vat_multiplier before
+        any buy/sell calculation, so the configured VAT is applied by exactly
+        one owner (#903). A source must never strip VAT itself: it would hold
+        a second copy of the setting that settings updates do not reach.
 
         Default is False (sources return VAT-exclusive spot prices).
         """
@@ -147,8 +166,8 @@ class HomeAssistantSource(PriceSource):
     """Home Assistant Nordpool sensor price source with robust timestamp-based parsing.
 
     This source handles Nordpool prices from Home Assistant, which include VAT.
-    It removes VAT from prices before returning them, ensuring all price sources
-    consistently return VAT-exclusive prices.
+    It returns them as published and declares prices_include_vat, so
+    PriceManager strips VAT with the configured multiplier.
     """
 
     # Nord Pool day-ahead auction clears ~12:42 CET, prices generally
@@ -158,21 +177,22 @@ class HomeAssistantSource(PriceSource):
     def __init__(
         self,
         ha_controller: Any,
-        vat_multiplier: float,
         entity: str,
     ) -> None:
         """Initialize with Home Assistant controller and entity ID.
 
         Args:
             ha_controller: Controller with access to Home Assistant
-            vat_multiplier: VAT multiplier used to convert VAT-inclusive prices to VAT-exclusive
-                            (must be provided from config.yaml)
             entity: HA entity ID for the Nordpool HACS sensor (exposes both today and
                     tomorrow prices as attributes on the same entity)
         """
         self.ha_controller = ha_controller
-        self.vat_multiplier = vat_multiplier
         self.entity = entity
+
+    @property
+    def prices_include_vat(self) -> bool:
+        """Nordpool HACS sensor prices include VAT."""
+        return True
 
     def get_prices_for_date(self, target_date: date) -> list:
         """Get prices from Home Assistant for the specified date.
@@ -256,7 +276,8 @@ class HomeAssistantSource(PriceSource):
         (VAT-inclusive) prices were cached as tomorrow, inflated by the VAT
         multiplier. When tomorrow is not yet confirmed we return None so the
         caller raises PriceDataUnavailableError and retries on a later cycle,
-        matching every other price source.
+        matching every other price source. Prices are returned VAT-inclusive,
+        as published.
         """
         if not sensor_attributes:
             return None
@@ -270,9 +291,7 @@ class HomeAssistantSource(PriceSource):
                     if prices:
                         return prices
 
-            # Fall back to the plain (timestamp-less) arrays. Nordpool HA
-            # arrays include VAT -- strip it to match the raw path and every
-            # other source.
+            # Fall back to the plain (timestamp-less) arrays.
             current_date = time_utils.today()
             tomorrow_date = current_date + timedelta(days=1)
 
@@ -286,7 +305,6 @@ class HomeAssistantSource(PriceSource):
                 prices = None
 
             if prices:
-                prices = [price / self.vat_multiplier for price in prices]
                 return self._handle_dst_transitions(prices)
 
             return None
@@ -324,10 +342,6 @@ class HomeAssistantSource(PriceSource):
 
             # Extract prices
             prices = [float(entry["value"]) for entry in raw_data if "value" in entry]
-
-            # Nordpool prices from Home Assistant include VAT - remove it
-            # to standardize all price sources to return VAT-exclusive prices
-            prices = [price / self.vat_multiplier for price in prices]
 
             # Handle DST transitions
             return self._handle_dst_transitions(prices)
@@ -438,6 +452,8 @@ class PriceManager:
         area: str,
         spot_multiplier: float = 1.0,
         export_spot_multiplier: float = 1.0,
+        grid_tariff_hourly: list[float] | None = None,
+        grid_tariff_summer_hourly: list[float] | None = None,
         free_import_price: float = FREE_IMPORT_PRICE,
         free_import_window_source: (
             Callable[[datetime, datetime], list[CalendarWindow]] | None
@@ -451,12 +467,18 @@ class PriceManager:
         Args:
             price_source: Source of raw Nordpool prices
             markup_rate: Markup rate applied to buy prices
-            vat_multiplier: VAT multiplier applied to buy prices
+            vat_multiplier: VAT multiplier applied to buy prices, and removed
+                from the spot prices of a source whose prices_include_vat
             additional_costs: Additional fixed costs added to buy prices
             tax_reduction: Tax reduction applied to sell prices
             area: Price area code (e.g. "SE4", "NO1", "DK1")
             spot_multiplier: Multiplicative factor on spot buy price (1.0 = no adjustment)
             export_spot_multiplier: Multiplicative factor on spot sell price
+            grid_tariff_hourly: 24 hourly grid fees (VAT-incl.) added to the
+                buy price by local hour; empty/None = no time-of-day tariff
+            grid_tariff_summer_hourly: 24 hourly grid fees used instead of
+                grid_tariff_hourly in GRID_TARIFF_SUMMER_MONTHS; empty/None =
+                grid_tariff_hourly applies all year
             free_import_price: Buy price for periods inside a free-import window
             free_import_window_source: Returns the free-import windows
                 overlapping ``[start, end)``; None when no window source exists
@@ -475,6 +497,8 @@ class PriceManager:
         self.area = area
         self.spot_multiplier = spot_multiplier
         self.export_spot_multiplier = export_spot_multiplier
+        self.grid_tariff_hourly = list(grid_tariff_hourly or [])
+        self.grid_tariff_summer_hourly = list(grid_tariff_summer_hourly or [])
         self.free_import_price = free_import_price
         self._free_import_window_source = free_import_window_source
         self._power_down_window_source = power_down_window_source
@@ -511,11 +535,12 @@ class PriceManager:
         self._tomorrow_prices = None
         self._tomorrow_date = None
 
-    def _calculate_buy_price(self, base_price: float) -> float:
+    def _calculate_buy_price(self, base_price: float, grid_tariff: float) -> float:
         """Calculate retail buy price from Nordpool base price.
 
         Args:
             base_price: Raw Nordpool price (VAT-exclusive)
+            grid_tariff: Time-of-day grid fee for this period (VAT-inclusive)
 
         Returns:
             Calculated retail price
@@ -523,7 +548,22 @@ class PriceManager:
         result = (
             base_price * self.spot_multiplier + self.markup_rate
         ) * self.vat_multiplier
-        return result + self.additional_costs
+        return result + self.additional_costs + grid_tariff
+
+    def _grid_tariff_for_period(self, target_date: date, period: int) -> float:
+        """Grid tariff for a period of target_date, by its local clock hour.
+
+        period_start() counts real elapsed time, so on a DST day each period
+        lands on its true wall-clock hour. The summer profile, when set,
+        replaces the year-round one in GRID_TARIFF_SUMMER_MONTHS (by the
+        period's own date). With no profile the fee is 0.0.
+        """
+        if not self.grid_tariff_hourly:
+            return 0.0
+        start = time_utils.period_start(target_date, period)
+        if self.grid_tariff_summer_hourly and start.month in GRID_TARIFF_SUMMER_MONTHS:
+            return self.grid_tariff_summer_hourly[start.hour]
+        return self.grid_tariff_hourly[start.hour]
 
     def _calculate_sell_price(self, base_price: float) -> float:
         """Calculate sell-back price from Nordpool base price.
@@ -571,7 +611,7 @@ class PriceManager:
         """Fetch target_date's prices from the source and cache them.
 
         get_price_data() without the cache check. refresh_cache() calls it
-        directly to re-fetch a day that was cached short.
+        directly so a cached day follows the source.
         """
         try:
             # Get raw prices from the source
@@ -583,8 +623,8 @@ class PriceManager:
             # Some import/export tariff combinations project import prices
             # further ahead than export prices, so the sell list can stop short
             # of the buy list. Keep only the periods both lists cover, so the
-            # day ends early instead of failing outright. refresh_cache()
-            # re-fetches a short day.
+            # day ends early instead of failing outright. The next
+            # refresh_cache() picks up the rest once the source has it.
             if direct_sell_prices is not None and len(direct_sell_prices) < len(
                 raw_prices
             ):
@@ -596,6 +636,11 @@ class PriceManager:
                     target_date,
                 )
                 raw_prices = raw_prices[: len(direct_sell_prices)]
+
+            # Normalise to VAT-exclusive spot with the configured multiplier
+            # -- the same one _calculate_buy_price re-applies (#903).
+            if self.price_source.prices_include_vat:
+                raw_prices = [price / self.vat_multiplier for price in raw_prices]
 
             # Format prices with timestamp and calculations
             price_data = []
@@ -613,7 +658,9 @@ class PriceManager:
                 buy_price = (
                     price
                     if self.price_source.prices_are_final
-                    else self._calculate_buy_price(price)
+                    else self._calculate_buy_price(
+                        price, self._grid_tariff_for_period(target_date, index)
+                    )
                 )
 
                 price_entry = {
@@ -686,13 +733,17 @@ class PriceManager:
     def _tomorrow_publication_reached(self) -> bool:
         """Whether the active market has published tomorrow's day-ahead prices.
 
-        Compared against the source's declared TOMORROW_EARLIEST in that
-        market's own timezone, so it is correct regardless of the user's
-        configured timezone.
+        Compared against the source's declared TOMORROW_EARLIEST on the day
+        before tomorrow, in that market's own timezone. The date matters: just
+        after midnight east of the market it is still the previous evening
+        there, past the time of day but ~12 h before publication (#902).
         """
         hour, minute, tzname = self.price_source.TOMORROW_EARLIEST
-        market_now = time_utils.now().astimezone(ZoneInfo(tzname))
-        return (market_now.hour, market_now.minute) >= (hour, minute)
+        tomorrow = time_utils.today() + timedelta(days=1)
+        publication = datetime.combine(
+            tomorrow - timedelta(days=1), time(hour, minute), tzinfo=ZoneInfo(tzname)
+        )
+        return time_utils.now() >= publication
 
     def refresh_cache(self) -> None:
         """Populate the today/tomorrow price cache off the optimizer's path.
@@ -700,10 +751,12 @@ class PriceManager:
         Called by the dedicated refresh scheduler job and once synchronously
         at startup. Every failure is swallowed: the optimizer reads whatever
         is cached via get_cached_*_prices() and never fetches on its own
-        thread (#709). get_price_data() is a no-op when the day is already
-        cached, so a warm day is not re-fetched. Tomorrow is skipped until
-        the market's publication time to avoid pointless calls against a
-        sometimes-flaky HA integration.
+        thread (#709). Each call re-fetches the day even when it is cached
+        complete: a source can replace a complete day (a forecast sensor
+        swapping in confirmed prices, a market correction), and the cache
+        must follow it (#902). Tomorrow is skipped until the market's
+        publication time to avoid pointless calls against a sometimes-flaky
+        HA integration.
 
         Free-import and Power Down windows are re-fetched on every call
         regardless, since a booking can change after the day's prices are
@@ -713,29 +766,20 @@ class PriceManager:
         self._refresh_free_import_windows(today)
         self._refresh_power_down_windows(today)
 
+        # _fetch_price_data writes the cache only after a successful build, so
+        # a failed fetch keeps the previously cached day.
         try:
-            self._refresh_day(today)
+            self._fetch_price_data(today)
         except Exception as e:
             self._logger.warning("Price refresh: today's prices unavailable: %s", e)
 
         if self._tomorrow_publication_reached():
             try:
-                self._refresh_day(today + timedelta(days=1))
+                self._fetch_price_data(today + timedelta(days=1))
             except Exception as e:
                 self._logger.debug(
                     "Price refresh: tomorrow's prices not yet available: %s", e
                 )
-
-    def _refresh_day(self, day: date) -> None:
-        """Cache a day's prices, re-fetching a day that was cached short.
-
-        A day trimmed to a short sell price list (see _fetch_price_data) is
-        fetched again on every refresh until the source fills it in. If that
-        fetch fails, the short day stays cached.
-        """
-        cached = self.get_price_data(day)
-        if len(cached) < time_utils.get_period_count(day):
-            self._fetch_price_data(day)
 
     def _refresh_free_import_windows(self, today: date) -> None:
         """Replace the free-import windows for today and tomorrow.
@@ -840,8 +884,14 @@ class PriceManager:
             List of buy prices
         """
         if raw_prices is not None:
-            # Calculate buy prices directly from the provided raw prices
-            return [self._calculate_buy_price(price) for price in raw_prices]
+            # Calculate buy prices directly from the provided raw prices.
+            # They carry no date, so a time-of-day tariff cannot be placed.
+            if self.grid_tariff_hourly:
+                raise ValueError(
+                    "raw_prices cannot be priced with a grid tariff profile; "
+                    "pass target_date instead"
+                )
+            return [self._calculate_buy_price(price, 0.0) for price in raw_prices]
         else:
             # Get buy prices from the price data for the specified date
             price_data = self.get_price_data(target_date)
