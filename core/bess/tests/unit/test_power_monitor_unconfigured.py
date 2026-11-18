@@ -1,5 +1,6 @@
 import pytest  # type: ignore
 
+from core.bess.growatt_min_controller import GrowattMinController
 from core.bess.power_monitor import HomePowerMonitor
 from core.bess.settings import BatterySettings, HomeSettings
 
@@ -50,6 +51,7 @@ def test_check_health_unconfigured_sensors_when_enabled(unconfigured_controller)
     the feature crashed every 5-minute cycle)."""
     monitor = HomePowerMonitor(
         unconfigured_controller,
+        GrowattMinController(BatterySettings()),
         HomeSettings(power_monitoring_enabled=True, phase_count=3),
         BatterySettings(),
     )
@@ -65,6 +67,7 @@ def test_check_health_disabled_still_ok(unconfigured_controller):
     """Sanity: disabled power monitoring must remain unaffected (existing behavior)."""
     monitor = HomePowerMonitor(
         unconfigured_controller,
+        GrowattMinController(BatterySettings()),
         HomeSettings(power_monitoring_enabled=False),
         BatterySettings(),
     )

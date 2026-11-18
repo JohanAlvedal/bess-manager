@@ -131,6 +131,9 @@ class HuaweiController(InverterController):
     """
 
     supports_charge_rate_control: ClassVar[bool] = False
+    # "Maximum charging power" (storage_maximum_charging_power, watts) caps
+    # charging the moment it is written, so the fuse guard can throttle it.
+    has_live_charge_cap: ClassVar[bool] = True
     discharge_rate_is_load_following: ClassVar[bool] = False
 
     # A discharge period is a time slot, not a rate -- there is no per-period
@@ -172,6 +175,19 @@ class HuaweiController(InverterController):
         if not success:
             return success, error
         return self._apply_forcible_export(controller, strategic_intent, discharge_rate)
+
+    def read_fuse_guard_charge_rate(self, controller: Any) -> float | None:
+        """The charging-power cap as a percent of max charge power."""
+        cap_w = controller.get_charging_power_rate()
+        if cap_w is None:
+            return None
+        return float(cap_w) / (self.max_charge_power_kw * 1000) * 100
+
+    def write_fuse_guard_charge_rate(self, controller: Any, rate_pct: int) -> None:
+        """Write the charging-power cap, which the entity takes in watts."""
+        cap_w = round(rate_pct / 100 * self.max_charge_power_kw * 1000)
+        logger.info("HUAWEI HARDWARE: maximum charging power -> %d W", cap_w)
+        controller.set_charging_power_rate(cap_w)
 
     def _apply_forcible_export(
         self, controller: Any, strategic_intent: str, discharge_rate: int

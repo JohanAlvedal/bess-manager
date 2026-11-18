@@ -427,13 +427,19 @@ class BatterySystemManager:
     def realtime_fuse_guard_supported(self) -> bool:
         """Can the real-time fuse guard (`HomePowerMonitor`) run here?
 
-        It protects the fuse by throttling the per-period charge rate, so it
-        needs a platform that has one. Without it, fuse protection is only
-        the DP's planning cap, which works on forecast load (#901). The single
-        declaration the monitor's lifecycle, the health check and the
-        Settings page all derive from.
+        It protects the fuse by throttling the charge rate, so it needs a
+        platform with a per-period charge-rate register or a live charging-
+        power cap. Without either, fuse protection is only the DP's planning
+        cap, which works on forecast load (#901). The single declaration the
+        monitor's lifecycle, the health check and the Settings page all
+        derive from.
         """
-        return self._supports_charge_rate_control
+        if not self._inverter_controller:
+            return False
+        return (
+            self._inverter_controller.supports_charge_rate_control
+            or self._inverter_controller.has_live_charge_cap
+        )
 
     def _sync_power_monitor(self) -> None:
         """Make the monitor exist exactly when fuse protection is enabled and
@@ -446,6 +452,8 @@ class BatterySystemManager:
         """
         enabled = self.home_settings.power_monitoring_enabled
         if not (enabled and self.realtime_fuse_guard_supported):
+            if self._power_monitor is not None:
+                self._release_live_charge_cap()
             self._power_monitor = None
             if enabled and self._inverter_controller is not None:
                 logger.warning(
@@ -457,12 +465,37 @@ class BatterySystemManager:
                     type(self._inverter_controller).__name__,
                 )
             return
-        if self._power_monitor is None and self._controller is not None:
+        if (
+            self._power_monitor is None
+            and self._controller is not None
+            and self._inverter_controller is not None
+        ):
             self._power_monitor = HomePowerMonitor(
                 self._controller,
+                self._inverter_controller,
                 home_settings=self.home_settings,
                 battery_settings=self.battery_settings,
             )
+
+    def _release_live_charge_cap(self) -> None:
+        """Return a live charging-power cap to full power as the guard stops.
+
+        The cap is a persistent inverter setting that caps solar charging
+        too, and once the guard is gone nothing else writes it -- a cap left
+        lowered by the last throttle would stay lowered for good.
+        """
+        inverter = self._inverter_controller
+        if inverter is None or not inverter.has_live_charge_cap:
+            return
+        assert self._controller is not None
+        try:
+            current = inverter.read_fuse_guard_charge_rate(self._controller)
+            if current is not None and current >= 99:
+                return
+            logger.info("Fuse guard stopping: releasing the charging-power cap")
+            inverter.write_fuse_guard_charge_rate(self._controller, 100)
+        except requests.RequestException as e:
+            logger.error("Failed to release the charging-power cap: %s", e)
 
     @property
     def platform_capabilities(self) -> PlatformCapabilities:
@@ -4783,11 +4816,12 @@ class BatterySystemManager:
         """Adjust charging power based on house consumption.
 
         Platforms that use atomic schedule writes (SPH, SolaX) have no
-        per-period charge rate register — skip entirely.
+        per-period charge rate register — skip entirely, unless they have a
+        live charging-power cap for the fuse guard (Huawei).
         """
         if not self.is_configured:
             return
-        if not self._supports_charge_rate_control:
+        if not self.realtime_fuse_guard_supported:
             return
         # is_configured already guarantees this; assert narrows it for the type
         # checker (the property can't narrow the attribute).
@@ -4800,11 +4834,16 @@ class BatterySystemManager:
             charge_rate = settings["charge_rate"]
 
             if self._power_monitor:
+                # A live cap is not a per-period rate: it caps all charging,
+                # solar included, so its unthrottled value is full power, never
+                # the plan's charge rate (0 in a discharge period).
+                if not self._supports_charge_rate_control:
+                    charge_rate = 100
                 self._power_monitor.update_target_charging_power(charge_rate)
                 self._power_monitor.adjust_battery_charging(
                     grid_charging=settings["grid_charge"]
                 )
-            else:
+            elif self._supports_charge_rate_control:
                 # Power monitor disabled — write charge rate directly so the
                 # inverter register is not left at a stale value (e.g. 0% from a
                 # preceding LOAD_SUPPORT or BATTERY_EXPORT period). Deduped so an

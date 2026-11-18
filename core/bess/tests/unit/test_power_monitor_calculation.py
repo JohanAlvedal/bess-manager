@@ -6,6 +6,7 @@ available charging power based on phase loads and battery constraints.
 
 import pytest  # type: ignore
 
+from core.bess.growatt_min_controller import GrowattMinController
 from core.bess.power_monitor import HomePowerMonitor
 from core.bess.settings import BatterySettings, HomeSettings
 
@@ -94,7 +95,9 @@ def test_available_power_calculation_user_scenario(standard_settings):
         l3_current=1840 / 230,  # ~8.0A (most loaded)
     )
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
 
     # Calculate available charging power
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
@@ -132,7 +135,9 @@ def test_zero_household_load_allows_full_charging(standard_settings):
 
     controller = MockController(l1_current=0.0, l2_current=0.0, l3_current=0.0)
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Available power per phase: 5,462.5W (full capacity with safety margin)
@@ -155,7 +160,9 @@ def test_high_household_load_limits_charging(standard_settings):
         l3_current=4000 / 230,  # ~17.4A (most loaded)
     )
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Available power on phase 3: 5,462.5W - 4,000W = 1,462.5W
@@ -178,7 +185,9 @@ def test_near_fuse_limit_prevents_charging(standard_settings):
         l3_current=5200 / 230,  # ~22.6A (near 23.75A safety limit)
     )
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Available power on phase 3: 5,462.5W - 5,200W = 262.5W
@@ -201,7 +210,9 @@ def test_balanced_phases_uses_most_loaded(standard_settings):
         l3_current=3000 / 230,  # ~13A (most loaded)
     )
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Should be based on L3 (3,000W), not average (1,667W)
@@ -225,7 +236,9 @@ def test_calculation_improvement_vs_old_algorithm(standard_settings):
         l1_current=1541 / 230, l2_current=1449 / 230, l3_current=1840 / 230
     )
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     new_available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Old (buggy) algorithm would calculate:
@@ -262,7 +275,9 @@ def test_different_battery_sizes(standard_settings):
         l1_current=1541 / 230, l2_current=1449 / 230, l3_current=1840 / 230
     )
 
-    monitor = HomePowerMonitor(controller, home, battery_small)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery_small
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Available power: 3,622.5W
@@ -285,7 +300,9 @@ def test_different_safety_margins():
         l1_current=1541 / 230, l2_current=1449 / 230, l3_current=1840 / 230
     )
 
-    monitor_98 = HomePowerMonitor(controller, home_98, battery)
+    monitor_98 = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home_98, battery
+    )
     available_pct_98 = monitor_98.calculate_available_charging_power(current_rate_pct=0)
 
     # Max per phase: 230 * 25 * 0.98 = 5,635W
@@ -298,7 +315,9 @@ def test_different_safety_margins():
     # Test with 90% safety margin (more conservative)
     home_90 = HomeSettings(max_fuse_current=25, voltage=230, safety_margin=0.90)
 
-    monitor_90 = HomePowerMonitor(controller, home_90, battery)
+    monitor_90 = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home_90, battery
+    )
     available_pct_90 = monitor_90.calculate_available_charging_power(current_rate_pct=0)
 
     # Max per phase: 230 * 25 * 0.90 = 5,175W
@@ -344,7 +363,9 @@ def test_single_phase_no_division(single_phase_settings):
     # Light load: 1840W on the single phase
     controller = MockController(l1_current=1840 / 230)
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Max power per phase: 230 * 25 * 0.95 = 5,462.5W
@@ -379,7 +400,9 @@ def test_single_phase_only_reads_l1(single_phase_settings):
     controller.get_l2_current = tracking_l2
     controller.get_l3_current = tracking_l3
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     monitor.get_current_phase_loads_w()
 
     assert "l2" not in calls, "L2 should not be read on single-phase"
@@ -393,7 +416,9 @@ def test_single_phase_fuse_protection(single_phase_settings):
     # Zero load — full fuse capacity available
     controller = MockController(l1_current=0.0)
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Available power: 5,462.5W
@@ -413,7 +438,9 @@ def test_single_phase_high_load(single_phase_settings):
     # Load near fuse limit: 5,200W
     controller = MockController(l1_current=5200 / 230)
 
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
     available_pct = monitor.calculate_available_charging_power(current_rate_pct=0)
 
     # Available power: 5,462.5 - 5,200 = 262.5W
@@ -430,7 +457,9 @@ def test_single_phase_returns_single_element_tuple(single_phase_settings):
     home, battery = single_phase_settings
 
     controller = MockController(l1_current=10.0)
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
 
     loads = monitor.get_current_phase_loads_w()
     assert len(loads) == 1, f"Expected 1-element tuple, got {len(loads)}"
@@ -442,7 +471,9 @@ def test_three_phase_returns_three_element_tuple(standard_settings):
     home, battery = standard_settings
 
     controller = MockController(l1_current=5.0, l2_current=6.0, l3_current=7.0)
-    monitor = HomePowerMonitor(controller, home, battery)
+    monitor = HomePowerMonitor(
+        controller, GrowattMinController(BatterySettings()), home, battery
+    )
 
     loads = monitor.get_current_phase_loads_w()
     assert len(loads) == 3, f"Expected 3-element tuple, got {len(loads)}"
@@ -467,6 +498,7 @@ def test_get_current_phase_loads_w_raises_value_error_on_none_reading():
 
     monitor = HomePowerMonitor(
         FlakyController(),
+        GrowattMinController(BatterySettings()),
         HomeSettings(power_monitoring_enabled=True, phase_count=3),
         BatterySettings(),
     )

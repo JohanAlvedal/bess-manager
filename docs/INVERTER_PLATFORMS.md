@@ -642,6 +642,17 @@ the battery, not trusting BESS's record of what it started (a restart
 mid-export would otherwise leave it running). Unmapped, BATTERY_EXPORT stays
 a plain TOU discharge period.
 
+**Real-time fuse guard.** Huawei has no per-period charge-rate register, but
+its "Maximum charging power" number (`storage_maximum_charging_power`, watts,
+mapped as `battery_charging_power_rate`) caps charging the moment it is
+written. With fuse protection enabled, the guard lowers that cap while the
+plan grid-charges and a phase nears the fuse, converting its percent to watts
+of the configured max charge power. Outside grid charging it returns the cap
+to full power, because the cap limits solar charging as well, and it does the
+same when fuse protection is switched off. Without fuse protection BESS never
+writes the cap. It is a persistent setting, so the guard writes it only when
+the value changes by at least 1%.
+
 **Schedule readback (optional, #431).** `huawei_solar` has no
 `read_tou_periods` service, but its TOU period sensor publishes the
 programmed periods as `Period N` extra state attributes, in the very text
