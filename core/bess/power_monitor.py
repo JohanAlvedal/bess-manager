@@ -23,6 +23,7 @@ from datetime import datetime
 
 from .ha_api_controller import HomeAssistantAPIController
 from .health_check import perform_health_check
+from .inverter_controller import InverterController
 from .settings import BatterySettings, HomeSettings
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class HomePowerMonitor:
     def __init__(
         self,
         ha_controller: HomeAssistantAPIController,
+        inverter_controller: InverterController,
         home_settings: HomeSettings | None = None,
         battery_settings: BatterySettings | None = None,
     ) -> None:
@@ -42,12 +44,15 @@ class HomePowerMonitor:
 
         Args:
             ha_controller: Home Assistant controller instance
+            inverter_controller: Reads and writes the throttled charge rate,
+                which not every platform keeps as a percent register
             home_settings: Home electrical settings (optional)
             battery_settings: Battery settings (optional)
             step_size: Size of power adjustments in percent (default: 5%)
 
         """
         self.controller = ha_controller
+        self.inverter_controller = inverter_controller
         self.home_settings = home_settings or HomeSettings()
         self.battery_settings = battery_settings or BatterySettings()
 
@@ -262,7 +267,9 @@ class HomePowerMonitor:
                 comes from the plan, not from the inverter's grid-charge state,
                 which still reads off for a few seconds after a period starts.
         """
-        current_power = self.controller.get_charging_power_rate()
+        current_power = self.inverter_controller.read_fuse_guard_charge_rate(
+            self.controller
+        )
         if current_power is None:
             # The sensor read degraded (transient HA failure -- _get_raw_state
             # returns None once _api_request's retries are exhausted). Without
@@ -288,7 +295,9 @@ class HomePowerMonitor:
         logger.info(
             f"Adjusting charging power from {current_power:.0f}% to {target_power:.0f}%"
         )
-        self.controller.set_charging_power_rate(int(target_power))
+        self.inverter_controller.write_fuse_guard_charge_rate(
+            self.controller, int(target_power)
+        )
 
     def update_target_charging_power(self, percentage: float) -> None:
         """Update the target charging power percentage.

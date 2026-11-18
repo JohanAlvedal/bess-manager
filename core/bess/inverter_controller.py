@@ -99,6 +99,12 @@ class InverterController(ABC):
     # TOU schedule writes (SPH, SolaX native).
     supports_charge_rate_control: ClassVar[bool] = True
 
+    # A platform without that per-period register can still run the real-time
+    # fuse guard if it has a live charging-power cap the guard can lower while
+    # grid-charging and release afterwards (Huawei's "Maximum charging power").
+    # It overrides read/write_fuse_guard_charge_rate to translate the cap.
+    has_live_charge_cap: ClassVar[bool] = False
+
     # Whether the platform can curtail PV export via a hardware export-limit
     # register (issue #269), requiring a grid CT/smart meter. False by
     # default -- most platforms' HA integrations don't expose this control
@@ -1247,6 +1253,19 @@ class InverterController(ABC):
         self._last_written_charge_rate = None
         controller.set_charging_power_rate(charge_rate)
         self._last_written_charge_rate = charge_rate
+
+    def read_fuse_guard_charge_rate(
+        self, controller: "HomeAssistantAPIController"
+    ) -> float | None:
+        """The charge rate the fuse guard throttles, in percent of max charge
+        power (None when the read degraded)."""
+        return controller.get_charging_power_rate()
+
+    def write_fuse_guard_charge_rate(
+        self, controller: "HomeAssistantAPIController", rate_pct: int
+    ) -> None:
+        """Write the fuse guard's charge rate, in percent of max charge power."""
+        controller.set_charging_power_rate(rate_pct)
 
     def _discharge_rate_write_needed(self, discharge_rate: int) -> bool:
         """Whether the discharge-power-rate register needs a (re)write.

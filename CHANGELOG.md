@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- **Huawei: real-time fuse protection** — while grid-charging, BESS now lowers the battery's "Maximum charging power" when a phase nears the fuse and restores full power afterwards, instead of only planning against forecast load.
 - **HA Statistics consumption forecast now works without a load sensor** — on platforms with no load register (e.g. Huawei without EMMA), BESS derives the load history from the lifetime solar, grid and battery counters, so the strategy is available immediately with full recorder history. (thanks [@JohanAlvedal](https://github.com/JohanAlvedal))
 - **Debug export: planned consumption changes shown beside measured managed-load energy** — a bundle now shows whether an EV charger or other managed load followed the blocks you declared. ([#863](https://github.com/johanzander/bess-manager/issues/863))
 - **Debug export: Inverter page schedule included** — a bundle now records the Schedule Overview values you saw, so display problems can be checked directly. ([#866](https://github.com/johanzander/bess-manager/issues/866))

@@ -472,8 +472,11 @@ supports_charge_rate_control: ClassVar[bool] = False
 | Capability | Description | MIN | SPH | SolaX Native | Modbus Growatt MIN (TOU) | Modbus Growatt (VPP) | Huawei | Solis |
 |---|---|---|---|---|---|---|---|---|
 | `supports_charge_rate_control` | Per-period charge/discharge rate register | Yes | **No** | **No** | Yes | **No** | **No** | **No** |
+| `has_live_charge_cap` | Live charging-power cap the fuse guard can throttle | No | No | No | No | No | **Yes** | No |
 
 SPH controls charge power globally via `write_ac_charge_times(charge_power=100%)`. SolaX native and Growatt VPP mode use active-power commands. None of them has a per-period register the power monitor can read/write, so the real-time fuse guard cannot run there.
+
+Huawei has no per-period register either, but its "Maximum charging power" number (`storage_maximum_charging_power`, watts, mapped as `battery_charging_power_rate`) caps charging the moment it is written. `has_live_charge_cap` lets the guard throttle it: `HuaweiController` overrides `read/write_fuse_guard_charge_rate` to translate the guard's percent to watts of `max_charge_power_kw`, the guard's unthrottled target is always 100% (the cap limits solar charging too, so the plan's per-period rate is never written to it), and `_release_live_charge_cap()` returns it to full power when the guard stops, since nothing else ever writes it.
 
 BSM exposes this as `realtime_fuse_guard_supported` (#901), the one declaration everything about the real-time fuse guard derives from. `_sync_power_monitor()` keeps a `HomePowerMonitor` in existence exactly when fuse protection is enabled and the guard is supported, re-evaluated at startup, on home-settings changes, and on a control-mode or platform switch. The health check reports `WARNING` when fuse protection is enabled but the guard is unsupported, because only the DP's forecast-based import cap is protecting the fuse there. `GET /api/settings` returns the flag so the Settings page can say so too.
 

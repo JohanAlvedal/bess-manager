@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import pytest  # type: ignore
 
+from core.bess.growatt_min_controller import GrowattMinController
 from core.bess.power_monitor import HomePowerMonitor
 from core.bess.settings import BatterySettings, HomeSettings
 
@@ -81,7 +82,9 @@ def _monitor(
     battery = BatterySettings(
         max_charge_power_kw=max_charge_kw, charging_power_rate=100
     )
-    monitor = HomePowerMonitor(cast(Any, controller), home, battery)
+    monitor = HomePowerMonitor(
+        cast(Any, controller), GrowattMinController(BatterySettings()), home, battery
+    )
     monitor.update_target_charging_power(100)
     return monitor
 

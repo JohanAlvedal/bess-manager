@@ -1799,7 +1799,7 @@ class HomeAssistantAPIController:
         logger.info("Set discharge stop SOC -> %s%%", discharge_stop_soc)
         self._set_number_like(entity_id, discharge_stop_soc, "Set discharge stop SOC")
 
-    def get_charging_power_rate(self):
+    def get_charging_power_rate(self) -> float | None:
         """Get the charging power rate."""
         return self._get_sensor_value("battery_charging_power_rate")
 
