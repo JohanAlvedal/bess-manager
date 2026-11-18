@@ -101,6 +101,8 @@ def _valid_options() -> dict:
             "spot_multiplier": 1.0175,
             "export_spot_multiplier": 1.018,
             "use_actual_price": False,
+            "grid_tariff_hourly": [0.45] * 24,
+            "grid_tariff_summer_hourly": [0.23] * 24,
         },
     }
 
@@ -642,7 +644,7 @@ class TestNordpoolServiceContract:
             }
         }
 
-        source = OfficialNordpoolSource(ha_controller, "test-config-entry-id", 1.25)
+        source = OfficialNordpoolSource(ha_controller, "test-config-entry-id")
 
         # Patch time_utils so the date-range guard accepts our target_date.
         with patch("core.bess.official_nordpool_source.time_utils") as mock_time:

@@ -211,12 +211,18 @@ def _effective_import_cap_kwh(
     runtime -- on a fully unloaded 3-phase house it authorizes the battery up
     to its full `max_charge_power_w` (not a single phase's worth), since
     `available_pct` is computed relative to `max_charge_power_w / phase_count`
-    per phase. `HomePowerMonitor` remains the real-time backstop against
-    unbalanced loads (it measures actual per-phase current and throttles
-    battery charging against the single worst-loaded phase, commit 37201cb9,
-    #11); the DP has no per-phase forecast to reproduce that live check, so it
-    caps against the balanced-load assumption instead of the unbalanced
-    worst case.
+    per phase. Where the platform supports it, `HomePowerMonitor` is the
+    real-time backstop against unbalanced loads (it measures actual per-phase
+    current and throttles battery charging against the single worst-loaded
+    phase, commit 37201cb9, #11); the DP has no per-phase forecast to
+    reproduce that live check, so it caps against the balanced-load
+    assumption instead of the unbalanced worst case.
+
+    The backstop exists only when `realtime_fuse_guard_supported` holds
+    (a per-period charge rate to throttle). On Growatt VPP, SPH, SolaX, Huawei
+    and Solis it does not, and this cap -- against *forecast* load -- is the
+    only fuse protection; `safety_margin` is then the user's sole headroom for
+    load the forecast misses (#901).
     """
     if home_settings is None or not home_settings.power_monitoring_enabled:
         return None
@@ -1335,6 +1341,7 @@ def _run_dynamic_programming(
     # circular -- the same arrangement pwl_window_dp already has with this
     # file.
     from core.bess.action_selector import (
+        _discharge_is_partial_cover,
         _discharge_is_unexecutable,
         _residual_cover_p,
         _solar_export_bypass_is_unexecutable,
@@ -1420,6 +1427,18 @@ def _run_dynamic_programming(
         # finer percent lattice really has than excluding it. Measured on all
         # 33 fixtures (2026-08-09): masking here helps 7 and hurts 10, net
         # -0.004 SEK -- approximation noise, not a real bug either way.
+        #
+        # Partial load covers ARE masked (#884): on whole-load hardware they
+        # are a whole band with no command behind it, not a proxy for one, and
+        # the whole cover the replay offers instead is the cover column below.
+        feasible &= ~is_discharge | ~_discharge_is_partial_cover(
+            np.abs(power_row),
+            home_consumption[t],
+            solar_production[t],
+            dt,
+            capabilities,
+            battery_settings,
+        )
         next_soe = _state_transition_grid(
             soe_col,
             power_row,

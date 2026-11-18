@@ -47,7 +47,11 @@ from core.bess.health_check import (
 from core.bess.influxdb_helper import is_influxdb_configured
 from core.bess.models import PeriodData
 from core.bess.savings_aggregator import DEFAULT_COUNTS, build_buckets
-from core.bess.settings import BatterySettings, canonicalize_consumption_strategy
+from core.bess.settings import (
+    BatterySettings,
+    canonicalize_consumption_strategy,
+    validate_grid_tariff,
+)
 from core.bess.settings_store import (
     VALID_GRID_POWER_POLARITIES,
     VALID_PLATFORMS,
@@ -356,6 +360,14 @@ async def get_settings():
         # pointing at the migration note. Removed with the option in PR 6.
         data["influxdb_config_present"] = is_influxdb_configured()
 
+        # Whether fuse protection includes the real-time guard on the active
+        # platform/control mode, or is planning-only (#901). The Fuse
+        # Protection card warns on False; derived from the backend so the UI
+        # cannot infer it a second way.
+        data["realtime_fuse_guard_supported"] = (
+            bess_controller.system.realtime_fuse_guard_supported
+        )
+
         # Return the full per-platform sensors structure from the store.
         # Also include a flat "activeSensors" view for backwards compatibility.
         data.pop("sensors", None)
@@ -474,6 +486,15 @@ async def patch_settings(updates: dict):
                 _validate_power_monitoring_sensors(section, effective_sensors)
                 _validate_consumption_strategy(section, effective_sensors)
                 _validate_managed_load_sensors(section)
+
+            if store_key == "electricity_price":
+                try:
+                    validate_grid_tariff(
+                        section.get("grid_tariff_hourly", []),
+                        section.get("grid_tariff_summer_hourly", []),
+                    )
+                except ValueError as e:
+                    raise HTTPException(status_code=422, detail=str(e)) from e
 
             if store_key == "sensors":
                 # A sensor removal (e.g. unmapping a phase-current sensor) can
@@ -1277,7 +1298,13 @@ async def get_inverter_status():
         if battery_soc is None:
             raise ValueError("battery_soc sensor is unavailable")
         battery_soe = (battery_soc / 100.0) * battery_settings.total_capacity
-        grid_charge_enabled = controller.grid_charge_enabled()
+        # Gate on the entity, not CONTROL_MODEL: Huawei is period_list yet has
+        # a grid-charge entity, while Solis/SPH/native SolaX have none (#885).
+        grid_charge_enabled = (
+            controller.grid_charge_enabled()
+            if controller.is_sensor_configured("grid_charge")
+            else None
+        )
         charge_power_rate = controller.get_charging_power_rate()
         discharge_power_rate = controller.get_discharging_power_rate()
         battery_charge_power = controller.get_battery_charge_power()
@@ -1879,8 +1906,9 @@ async def recheck_system_health():
 
     Unlike GET /api/system-health (which runs a fresh check but doesn't touch
     the cache), this updates ``_cached_health_results``/``_critical_sensor_failures``
-    so the dashboard banner immediately reflects the result — for a "Recheck now"
-    button after the user fixes a sensor in Home Assistant.
+    so a fixed problem immediately leaves the dashboard banner — for a "Recheck
+    now" button after the user fixes a sensor in Home Assistant. A newly found
+    problem still has to persist before it raises one.
     """
     from app import bess_controller
 
@@ -1937,10 +1965,16 @@ async def get_dashboard_health_summary():
     try:
         logger.debug("Starting dashboard health summary check")
 
+        sustained_failures = bess_controller.system.get_sustained_health_failures()
+        critical_failures = [
+            failure
+            for failure in bess_controller.system.get_critical_sensor_failures()
+            if failure in sustained_failures
+        ]
+
         # Check if system is in degraded mode first
-        if bess_controller.system.has_critical_sensor_failures():
+        if critical_failures:
             # System is in degraded mode due to critical sensor failures
-            critical_failures = bess_controller.system.get_critical_sensor_failures()
             cached_results = bess_controller.system.get_cached_health_results() or {}
             components_by_name = {
                 component.get("name"): component
@@ -2006,6 +2040,7 @@ async def get_dashboard_health_summary():
                 component
                 for component in health_results.get("checks", [])
                 if component.get("status") in ("WARNING", "ERROR")
+                and component.get("name") in sustained_failures
             ]
             has_critical_error = any(
                 component.get("required") and component.get("status") == "ERROR"
@@ -3399,6 +3434,8 @@ async def setup_complete(payload: APISetupCompletePayload):
             "taxReduction": "tax_reduction",
             "spotMultiplier": "spot_multiplier",
             "exportSpotMultiplier": "export_spot_multiplier",
+            "gridTariffHourly": "grid_tariff_hourly",
+            "gridTariffSummerHourly": "grid_tariff_summer_hourly",
         }
         area = payload.area or payload.nordpoolArea
         if any(getattr(payload, f) is not None for f in _PRICE_MAP) or area:
@@ -3408,6 +3445,13 @@ async def setup_complete(payload: APISetupCompletePayload):
             for field, key in _PRICE_MAP.items():
                 if getattr(payload, field) is not None:
                     elec[key] = getattr(payload, field)
+            try:
+                validate_grid_tariff(
+                    elec.get("grid_tariff_hourly", []),
+                    elec.get("grid_tariff_summer_hourly", []),
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
             sections["electricity_price"] = elec
 
         # --- energy provider ---
@@ -3557,6 +3601,8 @@ async def setup_complete(payload: APISetupCompletePayload):
                     "tax_reduction": payload.taxReduction,
                     "spot_multiplier": payload.spotMultiplier,
                     "export_spot_multiplier": payload.exportSpotMultiplier,
+                    "grid_tariff_hourly": payload.gridTariffHourly,
+                    "grid_tariff_summer_hourly": payload.gridTariffSummerHourly,
                 }
             )
         if live_updates:
