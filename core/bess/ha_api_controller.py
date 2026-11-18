@@ -19,7 +19,7 @@ import websocket
 
 from .calendar_windows import CalendarWindow, parse_calendar_events
 from .consumption_overlay import OverlayBlock, parse_overlay_blocks
-from .energy_balance import derive_load_consumption
+from .energy_balance import LOAD_BALANCE_COUNTERS, derive_load_consumption
 from .exceptions import (
     CalendarWindowError,
     ConsumptionOverlayError,
@@ -3213,21 +3213,7 @@ class HomeAssistantAPIController:
             return direct
 
         # Derive from other lifetime sensors when direct sensor unavailable
-        inputs = {
-            "lifetime_solar_energy": self._get_sensor_value("lifetime_solar_energy"),
-            "lifetime_import_from_grid": self._get_sensor_value(
-                "lifetime_import_from_grid"
-            ),
-            "lifetime_export_to_grid": self._get_sensor_value(
-                "lifetime_export_to_grid"
-            ),
-            "lifetime_battery_charged": self._get_sensor_value(
-                "lifetime_battery_charged"
-            ),
-            "lifetime_battery_discharged": self._get_sensor_value(
-                "lifetime_battery_discharged"
-            ),
-        }
+        inputs = {key: self._get_sensor_value(key) for key in LOAD_BALANCE_COUNTERS}
         missing = [key for key, value in inputs.items() if value is None]
         if missing:
             # Name the counters, so "N/A" in the health check is traceable to

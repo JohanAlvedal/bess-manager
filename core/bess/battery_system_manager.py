@@ -28,6 +28,7 @@ from .dp_battery_algorithm import (
     print_optimization_results,
 )
 from .dp_schedule import DPSchedule
+from .energy_balance import LOAD_BALANCE_COUNTERS, derive_load_consumption_stats
 from .entsoe_source import EntsoeSource
 from .exceptions import (
     ConsumptionOverlayError,
@@ -106,6 +107,9 @@ _POWER_DOWN_OCTOPOINTS_CHECK_INTERVAL = timedelta(hours=1)
 # days of a session, not weeks, so this comfortably covers the lag while
 # keeping the per-check disk cost bounded regardless of install age.
 _POWER_DOWN_OCTOPOINTS_LOOKBACK_DAYS = 14
+# Stands in for a recorder statistic_id when the ha_statistics load history is
+# derived from the lifetime counters, so logs and the debug export say so.
+DERIVED_LOAD_STATISTIC_ID = "derived:lifetime_energy_balance"
 
 
 def ha_statistics_quarterly_profile(
@@ -1716,8 +1720,6 @@ class BatterySystemManager:
         if strategy == "ha_statistics":
             # Data-insufficiency or missing-sensor errors are handled the same
             # way: fall back to fixed until the situation resolves.
-            # TODO: derive load from solar+import-export so this works on all
-            # platforms (see TODO.md "ha_statistics on all platforms").
             try:
                 result = self._get_ha_statistics_forecast()
                 self._runtime_failure_tracker.dismiss_by_category(
@@ -1864,6 +1866,85 @@ class BatterySystemManager:
 
         return statistic_id, stats
 
+    def _fetch_load_consumption_stats(
+        self, start_dt: datetime, end_dt: datetime
+    ) -> tuple[str, list[dict]]:
+        """Fetch hourly house-load 'change' statistics for [start_dt, end_dt).
+
+        Reads the mapped ``lifetime_load_consumption`` sensor when there is
+        one. Otherwise derives the history from the five lifetime counters
+        every platform maps (``LOAD_BALANCE_COUNTERS``), whose recorder
+        history already exists — so the strategy needs neither an extra
+        helper sensor nor days of fresh history on platforms without a load
+        register (Huawei without EMMA, SolaX native).
+
+        Returns:
+            (statistic_id, stats) — statistic_id is the load sensor's, or
+            ``DERIVED_LOAD_STATISTIC_ID`` for the derived history.
+
+        Raises:
+            HAStatisticsUnavailableError: no load sensor and a counter is
+                unmapped, or the source has no statistics in the window.
+        """
+        controller = self.controller
+        if controller.is_sensor_configured("lifetime_load_consumption"):
+            target_sensor, _ = controller._resolve_entity_id(
+                "lifetime_load_consumption"
+            )
+            statistic_id, stats = self._fetch_recorder_change_stats(
+                target_sensor, start_dt, end_dt
+            )
+            if not stats:
+                raise HAStatisticsUnavailableError(
+                    f"No statistics data returned for {target_sensor} "
+                    f"(statistic_id: {statistic_id}) in the past 7 days"
+                )
+            return statistic_id, stats
+
+        unmapped = [
+            key
+            for key in LOAD_BALANCE_COUNTERS
+            if not controller.is_sensor_configured(key)
+        ]
+        if unmapped:
+            raise HAStatisticsUnavailableError(
+                "ha_statistics needs either the 'lifetime_load_consumption' "
+                "sensor or all five lifetime counters to derive it from; "
+                f"unmapped: {', '.join(unmapped)}"
+            )
+
+        counter_stats: dict[str, list[dict]] = {}
+        for key in LOAD_BALANCE_COUNTERS:
+            entity_id, _ = controller._resolve_entity_id(key)
+            statistic_id, stats = self._fetch_recorder_change_stats(
+                entity_id, start_dt, end_dt
+            )
+            if not stats:
+                raise HAStatisticsUnavailableError(
+                    f"Cannot derive load history: no statistics data returned "
+                    f"for {key} ({statistic_id}) in the past 7 days"
+                )
+            counter_stats[key] = stats
+
+        stats, incomplete_hours, clamped_hours = derive_load_consumption_stats(
+            counter_stats
+        )
+        if incomplete_hours or clamped_hours:
+            logger.warning(
+                "Derived load history: %d hour(s) skipped (missing from a "
+                "counter), %d hour(s) clamped to 0 (negative balance), "
+                "%d hour(s) used",
+                incomplete_hours,
+                clamped_hours,
+                len(stats),
+            )
+        if not stats:
+            raise HAStatisticsUnavailableError(
+                "Cannot derive load history: the lifetime counters share no "
+                "hour of statistics in the past 7 days"
+            )
+        return DERIVED_LOAD_STATISTIC_ID, stats
+
     def _fetch_ha_statistics_raw(self) -> tuple[str, list[dict]]:
         """Resolve the load-consumption statistic_id and fetch its raw 7-day stats.
 
@@ -1879,30 +1960,16 @@ class BatterySystemManager:
         Returns:
             (statistic_id, stats) — stats is the raw HA Recorder
             list of {"start": ..., "change": ...} entries, residual of any
-            configured managed loads.
+            configured managed loads. When the load history is derived from
+            the lifetime counters, statistic_id names that derivation.
 
         Raises:
-            HAStatisticsUnavailableError: sensor not configured, or no
-                statistics data available for it in the past 7 days.
+            HAStatisticsUnavailableError: no load history can be read — see
+                _fetch_load_consumption_stats.
             ManagedLoadsError: a configured managed-load sensor has no
                 statistics data available for it in the past 7 days.
         """
         from datetime import time
-
-        # Resolve entity_id via controller's canonical resolution path
-        try:
-            target_sensor, _ = self._controller._resolve_entity_id(
-                "lifetime_load_consumption"
-            )
-        except ValueError as e:
-            raise HAStatisticsUnavailableError(
-                "ha_statistics strategy requires 'lifetime_load_consumption' sensor "
-                "configured in the Sensors tab"
-            ) from e
-
-        # HA statistic_ids use the full entity_id with 'sensor.' prefix
-        if not target_sensor.startswith("sensor."):
-            target_sensor = f"sensor.{target_sensor}"
 
         today_date = time_utils.today()
         start_date = today_date - timedelta(days=7)
@@ -1911,14 +1978,7 @@ class BatterySystemManager:
         start_dt = datetime.combine(start_date, time(0, 0), tzinfo=tz)
         end_dt = datetime.combine(today_date, time(0, 0), tzinfo=tz)
 
-        statistic_id, stats = self._fetch_recorder_change_stats(
-            target_sensor, start_dt, end_dt
-        )
-        if not stats:
-            raise HAStatisticsUnavailableError(
-                f"No statistics data returned for {target_sensor} "
-                f"(statistic_id: {statistic_id}) in the past 7 days"
-            )
+        statistic_id, stats = self._fetch_load_consumption_stats(start_dt, end_dt)
 
         managed_load_sensors = self.home_settings.managed_load_sensors
         if managed_load_sensors:
@@ -1942,7 +2002,7 @@ class BatterySystemManager:
                     "load sensor's for those hours)",
                     clamped_hours,
                     len(stats),
-                    target_sensor,
+                    statistic_id,
                 )
 
         return statistic_id, stats

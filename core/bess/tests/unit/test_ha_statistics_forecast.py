@@ -446,3 +446,173 @@ class TestQuarterlyProfileExtraction:
         manager = _create_manager_with_stats(controller, {stat_id: stats})
 
         assert manager._get_ha_statistics_forecast() == pytest.approx(expected)
+
+
+_COUNTER_ENTITIES = {
+    "lifetime_solar_energy": "sensor.pv_total",
+    "lifetime_import_from_grid": "sensor.grid_import_total",
+    "lifetime_export_to_grid": "sensor.grid_export_total",
+    "lifetime_battery_charged": "sensor.battery_charged_total",
+    "lifetime_battery_discharged": "sensor.battery_discharged_total",
+}
+
+
+def _create_manager_without_load_sensor(
+    stats_response: dict, sensors: dict[str, str] | None = None
+) -> BatterySystemManager:
+    """A manager whose controller resolves sensors like the real one does:
+    an unmapped key raises instead of falling back to a dummy entity ID."""
+    controller = MockHomeAssistantController()
+    manager = _create_manager_with_stats(controller, stats_response)
+    controller.sensors = dict(_COUNTER_ENTITIES if sensors is None else sensors)
+
+    def strict_resolve(sensor_key: str) -> tuple[str, str]:
+        if sensor_key not in controller.sensors:
+            raise ValueError(f"No entity ID configured for sensor '{sensor_key}'")
+        return controller.sensors[sensor_key], "configured"
+
+    controller._resolve_entity_id = strict_resolve  # type: ignore[method-assign]
+    return manager
+
+
+def _run_forecast(manager: BatterySystemManager) -> list[float]:
+    with patch("core.bess.battery_system_manager.time_utils") as mock_tu:
+        mock_tu.today.return_value = datetime(2026, 5, 12, tzinfo=TIMEZONE).date()
+        mock_tu.TIMEZONE = TIMEZONE
+        return manager._get_ha_statistics_forecast()
+
+
+def _counter_stats(
+    solar: list[float],
+    grid_import: list[float],
+    grid_export: list[float],
+    charged: list[float],
+    discharged: list[float],
+) -> dict[str, list[dict]]:
+    return {
+        "sensor.pv_total": _make_hourly_stats(solar),
+        "sensor.grid_import_total": _make_hourly_stats(grid_import),
+        "sensor.grid_export_total": _make_hourly_stats(grid_export),
+        "sensor.battery_charged_total": _make_hourly_stats(charged),
+        "sensor.battery_discharged_total": _make_hourly_stats(discharged),
+    }
+
+
+class TestDerivedLoadHistory:
+    """Without a load-consumption sensor, ha_statistics derives the load history
+    from the five lifetime counters every platform already maps, so the
+    strategy works immediately with full recorder history."""
+
+    def test_forecast_follows_energy_balance_of_the_counters(self) -> None:
+        solar = [0.0] * 24
+        solar[12] = 3.0
+        stats = _counter_stats(
+            solar=solar,
+            grid_import=[1.5] * 24,
+            grid_export=[0.5 if h == 12 else 0.0 for h in range(24)],
+            charged=[1.0 if h == 12 else 0.0 for h in range(24)],
+            discharged=[0.0 if h == 12 else 0.5 for h in range(24)],
+        )
+        manager = _create_manager_without_load_sensor(stats)
+
+        result = _run_forecast(manager)
+
+        # Noon: 3.0 + 1.5 + 0.0 - 1.0 - 0.5 = 3.0 kWh/h. Other hours:
+        # 0.0 + 1.5 + 0.5 - 0.0 - 0.0 = 2.0 kWh/h.
+        assert len(result) == 96
+        assert result[12 * 4] == pytest.approx(0.75)
+        assert result[3 * 4] == pytest.approx(0.5)
+        assert sum(result) == pytest.approx(3.0 + 23 * 2.0)
+
+    def test_managed_load_is_subtracted_from_derived_history(self) -> None:
+        stats = _counter_stats(
+            solar=[0.0] * 24,
+            grid_import=[3.0] * 24,
+            grid_export=[0.0] * 24,
+            charged=[0.0] * 24,
+            discharged=[0.0] * 24,
+        )
+        stats["sensor.ev_charger_energy_total"] = _make_hourly_stats([1.0] * 24)
+        manager = _create_manager_without_load_sensor(stats)
+        manager.home_settings.managed_load_sensors = ["sensor.ev_charger_energy_total"]
+
+        result = _run_forecast(manager)
+
+        assert all(v == pytest.approx(0.5) for v in result)
+
+    def test_configured_load_sensor_takes_precedence(self) -> None:
+        stats = _counter_stats(
+            solar=[0.0] * 24,
+            grid_import=[4.0] * 24,
+            grid_export=[0.0] * 24,
+            charged=[0.0] * 24,
+            discharged=[0.0] * 24,
+        )
+        stats["sensor.load_energy_total"] = _make_hourly_stats([2.0] * 24)
+        manager = _create_manager_without_load_sensor(
+            stats,
+            sensors={
+                **_COUNTER_ENTITIES,
+                "lifetime_load_consumption": "sensor.load_energy_total",
+            },
+        )
+
+        result = _run_forecast(manager)
+
+        assert all(v == pytest.approx(0.5) for v in result)
+
+    def test_unmapped_counter_makes_strategy_unavailable(self) -> None:
+        sensors = dict(_COUNTER_ENTITIES)
+        del sensors["lifetime_battery_charged"]
+        stats = _counter_stats(*([[1.0] * 24] * 5))
+        manager = _create_manager_without_load_sensor(stats, sensors=sensors)
+
+        with pytest.raises(HAStatisticsUnavailableError, match="battery_charged"):
+            _run_forecast(manager)
+
+    def test_counter_without_statistics_makes_strategy_unavailable(self) -> None:
+        stats = _counter_stats(*([[1.0] * 24] * 5))
+        del stats["sensor.battery_discharged_total"]
+        manager = _create_manager_without_load_sensor(stats)
+
+        with pytest.raises(HAStatisticsUnavailableError):
+            _run_forecast(manager)
+
+    def test_hour_missing_from_one_counter_is_not_derived_from_the_rest(
+        self,
+    ) -> None:
+        """Deriving an hour from four counters would drop a whole term (here
+        the battery charge), overstating load — the hour must be left out."""
+        stats = _counter_stats(
+            solar=[0.0] * 24,
+            grid_import=[3.0] * 24,
+            grid_export=[0.0] * 24,
+            charged=[1.0] * 24,
+            discharged=[0.0] * 24,
+        )
+        stats["sensor.battery_charged_total"] = [
+            e
+            for e in stats["sensor.battery_charged_total"]
+            if datetime.fromtimestamp(e["start"] / 1000, TIMEZONE).hour != 5
+        ]
+        manager = _create_manager_without_load_sensor(stats)
+
+        result = _run_forecast(manager)
+
+        assert result[5 * 4] == pytest.approx(0.0)
+        assert result[6 * 4] == pytest.approx(0.5)
+
+    def test_inconsistent_hour_never_forecasts_negative_load(self) -> None:
+        stats = _counter_stats(
+            solar=[0.0] * 24,
+            grid_import=[1.0] * 24,
+            grid_export=[0.0] * 24,
+            charged=[3.0 if h == 2 else 0.0 for h in range(24)],
+            discharged=[0.0] * 24,
+        )
+        manager = _create_manager_without_load_sensor(stats)
+
+        result = _run_forecast(manager)
+
+        assert result[2 * 4] == pytest.approx(0.0)
+        assert result[3 * 4] == pytest.approx(0.25)
